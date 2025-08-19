@@ -28,7 +28,16 @@ from PyQt5.QtWidgets import (
     QTableView,
     QGraphicsDropShadowEffect,
 )
-from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QThread, QSize, QDate, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import (
+    QTimer,
+    Qt,
+    pyqtSignal,
+    QThread,
+    QSize,
+    QDate,
+    QPropertyAnimation,
+    QEasingCurve,
+)
 from PyQt5.QtGui import (
     QImage,
     QPixmap,
@@ -52,6 +61,7 @@ from database import (
 )
 from device_info import get_device_info, is_internet_available
 from speak import speak
+
 # Ensure UTF-8 encoding for the script
 import io
 
@@ -74,6 +84,7 @@ def format_date_ddmmyy(date_str: str) -> str:
             return dt.strftime("%d-%m-%y")
         except Exception:
             return date_str
+
 
 # ---------------------- Threads ----------------------
 class FetchThread(QThread):
@@ -119,7 +130,11 @@ class DetectWorker(QThread):
         try:
             result = self.detector_fn(self.frame)
         except Exception as e:
-            result = {"status": False, "emp_full_name": "System Error", "message": str(e)}
+            result = {
+                "status": False,
+                "emp_full_name": "System Error",
+                "message": str(e),
+            }
         self.result_ready.emit(result)
 
 
@@ -262,13 +277,17 @@ class CalendarDelegate(QStyledItemDelegate):
             painter.setPen(Qt.white)
         painter.drawText(rect, Qt.AlignCenter, text)
         painter.restore()
-        
+
+
 def get_app_version():
-        """Fetch app version dynamically from system/package metadata"""
-        try:
-         return importlib.metadata.version("FixHR")   # 👈 yahan apne package ka naam likho
-        except importlib.metadata.PackageNotFoundError:
-         return "dev"   # fallback agar system pe package metadata na mile
+    """Fetch app version dynamically from system/package metadata"""
+    try:
+        return importlib.metadata.version(
+            "FixHR"
+        )  # 👈 yahan apne package ka naam likho
+    except importlib.metadata.PackageNotFoundError:
+        return "dev"  # fallback agar system pe package metadata na mile
+
 
 # ---------------- SIDEBAR CLASS ----------------
 class Sidebar(QFrame):
@@ -336,7 +355,6 @@ class Sidebar(QFrame):
         layout.setContentsMargins(10, 20, 5, 20)  # left/right margins fixed
         layout.setAlignment(Qt.AlignTop)
 
-      
         # Logo
         logo_frame = QFrame()
         logo_frame.setFixedHeight(60)
@@ -381,7 +399,7 @@ class Sidebar(QFrame):
 
         layout.addStretch()
 
-      # Calendar
+        # Calendar
         self.cal_label = QLabel("CALENDAR")
         self.cal_label.setStyleSheet(
             "font-size: 11px; font-weight: 600; color: #9e9e9e; margin-bottom: 10px; background: transparent;"
@@ -444,7 +462,7 @@ class Sidebar(QFrame):
         main_layout.addWidget(scroll)
 
     def on_date_selected(self):
-        selected_date = self.calendar.selectedDate().toString("yyyy-MM-dd")
+        selected_date = self.calendar.selectedDate().toString("dd-MM-yyyy")
         self.date_selected.emit(selected_date)
 
     def toggle_sidebar(self):
@@ -887,8 +905,8 @@ class AttendanceApp(QWidget):
 
         # 🔹 Step 2: Create glow effect
         glow = QGraphicsDropShadowEffect(self.camera_container)
-        glow.setOffset(0, 0)   # Glow centered
-        glow.setBlurRadius(40) # Glow softness
+        glow.setOffset(0, 0)  # Glow centered
+        glow.setBlurRadius(40)  # Glow softness
 
         if recognition_status == "recognized":
             color = QColor("#4caf50")  # Green glow
@@ -906,11 +924,10 @@ class AttendanceApp(QWidget):
         self.glow_animation = QPropertyAnimation(glow, b"blurRadius")
         self.glow_animation.setStartValue(20)
         self.glow_animation.setEndValue(80)
-        self.glow_animation.setDuration(1000)   # 1 sec
-        self.glow_animation.setLoopCount(-1)    # infinite
+        self.glow_animation.setDuration(1000)  # 1 sec
+        self.glow_animation.setLoopCount(-1)  # infinite
         self.glow_animation.setEasingCurve(QEasingCurve.InOutQuad)
         self.glow_animation.start()
-
 
     def reset_camera_border_after_delay(self):
         """Reset camera border to default after 3 seconds"""
@@ -920,13 +937,13 @@ class AttendanceApp(QWidget):
         """Called when face recognition is successful"""
         # Update the employee card
         self.employee_card.update_status(employee_name, "#4caf50")
-        
+
         # Change border to green
         self.update_camera_border("recognized")
-        
+
         # Reset border after 3 seconds
         self.reset_camera_border_after_delay()
-        
+
         # Your existing recognition success logic here...
         print(f"Recognition successful: {employee_name}")
 
@@ -934,13 +951,13 @@ class AttendanceApp(QWidget):
         """Called when face recognition fails"""
         # Update the employee card
         self.employee_card.update_status("Unknown Person", "#f44336")
-        
+
         # Change border to red
         self.update_camera_border("failed")
-        
+
         # Reset border after 3 seconds
         self.reset_camera_border_after_delay()
-        
+
         # Your existing recognition failure logic here...
         print("Recognition failed")
 
@@ -1170,8 +1187,7 @@ class AttendanceApp(QWidget):
         button_layout.addWidget(reset_btn, 1)
         left_layout.addLayout(button_layout)
         content_layout.addWidget(left_panel)
-        
-        
+
         right_panel = ModernCard()
         right_panel.setStyleSheet(
             """
@@ -1623,7 +1639,6 @@ class AttendanceApp(QWidget):
         self.clock_timer.start(1000)
         self.is_detecting = False
         self.update_time()
-        
 
     def update_time(self):
         now = datetime.datetime.now()
@@ -1706,18 +1721,24 @@ class AttendanceApp(QWidget):
             return
         if self.cap is None or not self.cap.isOpened():
             return
-        if getattr(self, 'detect_worker_running', False):
+        if getattr(self, "detect_worker_running", False):
             return
         ret, frame = self.cap.read()
         if not ret or frame is None or frame.size == 0:
             return
         if len(frame.shape) != 3 or frame.shape[2] != 3:
-            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR) if len(frame.shape) == 2 else frame
+            frame = (
+                cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                if len(frame.shape) == 2
+                else frame
+            )
 
         self.detect_worker_running = True
         self._detect_worker = DetectWorker(self.detect_and_predict, frame)
         self._detect_worker.result_ready.connect(self.on_detect_result)
-        self._detect_worker.finished.connect(lambda: setattr(self, 'detect_worker_running', False))
+        self._detect_worker.finished.connect(
+            lambda: setattr(self, "detect_worker_running", False)
+        )
         self._detect_worker.start()
 
     def on_detect_result(self, result):
@@ -1751,8 +1772,10 @@ class AttendanceApp(QWidget):
         logs = get_attendance_logs()
         self.daily_table.setRowCount(0)
         # Update selected date label to today when loading today's logs
-        if hasattr(self, 'selected_date_label'):
-            self.selected_date_label.setText(f"Date: {datetime.datetime.now().strftime('%d-%m-%y')}")
+        if hasattr(self, "selected_date_label"):
+            self.selected_date_label.setText(
+                f"Date: {datetime.datetime.now().strftime('%d-%m-%y')}"
+            )
         for log in logs:
             row_pos = self.daily_table.rowCount()
             self.daily_table.insertRow(row_pos)
@@ -1783,8 +1806,10 @@ class AttendanceApp(QWidget):
     def update_table_by_date(self, selected_date):
         logs = get_attendance_by_date(selected_date)
         # Reflect selected date (format to dd-mm-yy)
-        if hasattr(self, 'selected_date_label'):
-            self.selected_date_label.setText(f"Date: {format_date_ddmmyy(selected_date)}")
+        if hasattr(self, "selected_date_label"):
+            self.selected_date_label.setText(
+                f"Date: {format_date_ddmmyy(selected_date)}"
+            )
         self.daily_table.setRowCount(0)
         if logs:
             for log in logs:
