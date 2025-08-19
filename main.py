@@ -390,12 +390,12 @@ class Sidebar(QFrame):
         )
         layout.addWidget(self.nav_label, alignment=Qt.AlignLeft)
 
-        self.nav_buttons = {}
-        self.nav_buttons["dashboard"] = SidebarButton("📊 Dashboard")
-        self.nav_buttons["dashboard"].clicked.connect(self.dashboard_clicked.emit)
-        self.nav_buttons["dashboard"].set_active(True)
-        self.active_button = self.nav_buttons["dashboard"]
-        layout.addWidget(self.nav_buttons["dashboard"], alignment=Qt.AlignLeft)
+        # self.nav_buttons = {}
+        # self.nav_buttons["dashboard"] = SidebarButton("📊 Dashboard")
+        # self.nav_buttons["dashboard"].clicked.connect(self.dashboard_clicked.emit)
+        # self.nav_buttons["dashboard"].set_active(True)
+        # self.active_button = self.nav_buttons["dashboard"]
+        # layout.addWidget(self.nav_buttons["dashboard"], alignment=Qt.AlignLeft)
 
         layout.addStretch()
 
@@ -898,15 +898,15 @@ class AttendanceApp(QWidget):
     def update_camera_border(self, recognition_status):
         """Show glowing background flash instead of border"""
 
-        # 🔹 Step 1: Remove border line completely (do this first)
+        # 🔹 Remove border line completely
         self.camera_container.setStyleSheet(
             "QFrame { background: transparent; border: none; border-radius: 200px; }"
         )
 
-        # 🔹 Step 2: Create glow effect
+        # 🔹 Create glow effect
         glow = QGraphicsDropShadowEffect(self.camera_container)
-        glow.setOffset(0, 0)  # Glow centered
-        glow.setBlurRadius(40)  # Glow softness
+        glow.setOffset(0, 0)   # Glow centered
+        glow.setBlurRadius(40) # Glow softness
 
         if recognition_status == "recognized":
             color = QColor("#4caf50")  # Green glow
@@ -915,17 +915,17 @@ class AttendanceApp(QWidget):
         elif recognition_status == "failed":
             color = QColor("#f44336")  # Red glow
         else:
-            color = QColor("#3f51b5")  # Blue glow
+            color = QColor("#3f51b5")  # Blue glow (default flash from start)
 
         glow.setColor(color)
         self.camera_container.setGraphicsEffect(glow)
 
-        # 🔹 Step 3: Animate glow pulsing (light flash)
+        # 🔹 Animate glow pulsing (flash)
         self.glow_animation = QPropertyAnimation(glow, b"blurRadius")
         self.glow_animation.setStartValue(20)
         self.glow_animation.setEndValue(80)
-        self.glow_animation.setDuration(1000)  # 1 sec
-        self.glow_animation.setLoopCount(-1)  # infinite
+        self.glow_animation.setDuration(1000)   # 1 sec
+        self.glow_animation.setLoopCount(-1)    # infinite
         self.glow_animation.setEasingCurve(QEasingCurve.InOutQuad)
         self.glow_animation.start()
 
@@ -1187,6 +1187,7 @@ class AttendanceApp(QWidget):
         button_layout.addWidget(reset_btn, 1)
         left_layout.addLayout(button_layout)
         content_layout.addWidget(left_panel)
+        
 
         right_panel = ModernCard()
         right_panel.setStyleSheet(
@@ -1253,6 +1254,8 @@ class AttendanceApp(QWidget):
         overview_grid = QGridLayout()
         overview_grid.setHorizontalSpacing(12)
         overview_grid.setVerticalSpacing(12)
+        
+        self.update_camera_border("default")
 
         def make_overview_card(title, number, sub, bg, fg, icon_text, compact=False):
             card = QFrame()
