@@ -218,8 +218,8 @@ import psutil
 import sqlite3
 import socket
 from datetime import datetime, timedelta
-from pydrive2.auth import GoogleAuth
-from pydrive2.drive import GoogleDrive
+# from pydrive2.auth import GoogleAuth
+# from pydrive2.drive import GoogleDrive
 
 
 class BackupManager:
@@ -229,10 +229,10 @@ class BackupManager:
         self.running = False
 
         # 🔍 Detect backup drive dynamically
-        self.backup_dir = self._find_backup_drive()
+        # self.backup_dir = self._find_backup_drive()
 
-        if not os.path.exists(self.backup_dir):
-            os.makedirs(self.backup_dir)
+        # if not os.path.exists(self.backup_dir):
+        #     os.makedirs(self.backup_dir)
 
         # Subfolders
         self.daily_dir = os.path.join(self.backup_dir, "Daily_Attendance")
@@ -250,35 +250,35 @@ class BackupManager:
         self.weekly_drive_folder = None
         self.monthly_drive_folder = None
 
-    def _find_backup_drive(self):
-        """Find alternate drive for backup (not same as DB drive)"""
-        db_drive = os.path.splitdrive(self.db_path)[0]  # Example: "C:"
-        backup_drive = None
+    # def _find_backup_drive(self):
+    #     """Find alternate drive for backup (not same as DB drive)"""
+    #     db_drive = os.path.splitdrive(self.db_path)[0]  # Example: "C:"
+    #     backup_drive = None
 
-        for part in psutil.disk_partitions(all=False):
-            drive = part.device.rstrip("\\")  # Example: "D:"
-            if drive != db_drive and os.path.exists(drive):
-                backup_drive = drive
-                break
+    #     for part in psutil.disk_partitions(all=False):
+    #         drive = part.device.rstrip("\\")  # Example: "D:"
+    #         if drive != db_drive and os.path.exists(drive):
+    #             backup_drive = drive
+    #             break
 
-        if backup_drive:
-            print(f"[BackupManager] 💾 Backup drive found: {backup_drive}")
-            return os.path.join(backup_drive, "FixHR_Backups")
-        else:
-            print("[BackupManager] ⚠ No alternate drive found, using same drive as DB")
-            return os.path.join(os.path.dirname(self.db_path), "FixHR_Backups")
+    #     if backup_drive:
+    #         print(f"[BackupManager] 💾 Backup drive found: {backup_drive}")
+    #         return os.path.join(backup_drive, "FixHR_Backups")
+    #     else:
+    #         print("[BackupManager] ⚠ No alternate drive found, using same drive as DB")
+    #         return os.path.join(os.path.dirname(self.db_path), "FixHR_Backups")
 
-    def _google_drive_auth(self):
-        """Authenticate Google Drive"""
-        try:
-            gauth = GoogleAuth()
-            gauth.LocalWebserverAuth()  # पहली बार login होगा browser से
-            drive = GoogleDrive(gauth)
-            print("[BackupManager] ✅ Google Drive connected")
-            return drive
-        except Exception as e:
-            print(f"[BackupManager] ❌ Google Drive Auth failed: {e}")
-            return None
+    # def _google_drive_auth(self):
+    #     """Authenticate Google Drive"""
+    #     try:
+    #         gauth = GoogleAuth()
+    #         gauth.LocalWebserverAuth()  # पहली बार login होगा browser से
+    #         drive = GoogleDrive(gauth)
+    #         print("[BackupManager] ✅ Google Drive connected")
+    #         return drive
+    #     except Exception as e:
+    #         print(f"[BackupManager] ❌ Google Drive Auth failed: {e}")
+    #         return None
 
     def _is_internet_available(self, host="8.8.8.8", port=53, timeout=3):
         """Check Internet connectivity"""
