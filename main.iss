@@ -21,7 +21,10 @@ DisableProgramGroupPage=no
 OutputBaseFilename=FixHR_Installer
 SolidCompression=yes
 WizardStyle=modern
-SetupIconFile=D:\Ml_Projects\Offline-Face-Recognition\fix_hr_prod_logo.ico
+; Use installer icon only if the file exists to avoid compile aborts
+#ifexist "fix_hr_prod_logo.ico"
+SetupIconFile=fix_hr_prod_logo.ico
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -29,13 +32,32 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+[Dirs]
+Name: "{app}\data"
+Name: "{app}\data\profile_images"
+
 [Files]
-Source: "D:\Ml_Projects\Offline-Face-Recognition\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "D:\Ml_Projects\Offline-Face-Recognition\dist\employees.db"; DestDir: "{app}"; Flags: ignoreversion
-Source: "D:\Ml_Projects\Offline-Face-Recognition\dist\profile_images\*"; DestDir: "{app}\profile_images"; Flags: recursesubdirs createallsubdirs
-Source: "D:\Ml_Projects\Offline-Face-Recognition\fix_hr_prod_logo.ico"; DestDir: "{app}"; Flags: ignoreversion
+; App executable built by PyInstaller
+Source: "dist\main.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
+
+; Static assets required at runtime
+Source: "background-img.jpg"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "fix_hr_prod_logo.png"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "liveness_model.tflite"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+
+; Optional runtime data (ship if present)
+Source: "dist\main\employees.db"; DestDir: "{app}\data"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "dist\main\face_index.faiss"; DestDir: "{app}\data"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "dist\main\face_codes.txt"; DestDir: "{app}\data"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "dist\main\face_index.sig"; DestDir: "{app}\data"; Flags: ignoreversion skipifsourcedoesntexist
+; If you want to pre-seed images, uncomment the following:
+; Source: "dist\main\profile_images\*"; DestDir: "{app}\data\profile_images"; Flags: recursesubdirs createallsubdirs skipifsourcedoesntexist
+
+; Copy app icon for shortcuts if present
+Source: "fix_hr_prod_logo.ico"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
+; Use the provided ICO for shortcuts
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\fix_hr_prod_logo.ico"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\fix_hr_prod_logo.ico"; Tasks: desktopicon
 

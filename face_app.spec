@@ -1,79 +1,53 @@
 # -*- mode: python ; coding: utf-8 -*-
-
 from PyInstaller.utils.hooks import collect_data_files
 import os
 
 # ✅ Collect MediaPipe model/data files
 mediapipe_datas = collect_data_files('mediapipe', include_py_files=False)
-
-block_cipher = None
-
-
-# Hidden imports for InsightFace and dependencies
-hidden_imports = [
-    'insightface',
-    'onnxruntime',
-    'onnx',
-    'cv2',
-    'numpy',
-    'faiss',
-    'sqlite3',
-    'pickle',
-    'skimage',
-    'PIL',
-    'PIL.Image',
-    'sklearn',
-    'scipy',
-    'matplotlib',
-    'onnxruntime.capi.onnxruntime_pybind11_state',
-    'onnxruntime.capi._pybind_state',
-]
-
-# Data files to include
-datas = [
-    # Include InsightFace models if bundling them
-    # ('C:/Users/suppo/.insightface/models', 'insightface/models'),
-    
-    # Include any other data files
-    ('profile_images', 'profile_images'),  # If you want to bundle default images
-    ('C:\\Users\\suppo\\.insightface\\models\\buffalo_l\\*', '.insightface/models/buffalo_l'),
-    ('liveness_model.tflite', '.'),
-]+ mediapipe_datas
-
-# Binary files to include (for ONNX runtime)
-binaries = []
-
+insightface_datas = collect_data_files('insightface', include_py_files=False)
 a = Analysis(
-    ['main.py'],  # Your main script
+    ['main.py'],
     pathex=[],
-    binaries=binaries,
-    datas=datas,
-    hiddenimports=hidden_imports,
+    binaries=[],
+    datas=[
+        ('liveness_model.tflite', '.'),
+        ('employees.db', '.'),
+        ('profile_images/*', 'profile_images/'),
+        ('background-img.jpg', '.'),
+        ('fix_hr_prod_logo.png', '.'),
+        ('face_index.faiss', '.'),
+        ('face_codes.txt', '.'),
+        ('face_index.sig', '.'),
+    ] + mediapipe_datas + insightface_datas,
+
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
+    optimize=0,
 )
-
-pyd = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
-    pyd,
+    pyz,
     a.scripts,
     a.binaries,
-    a.zipfiles,
     a.datas,
     [],
-    name='face_recognition_app',
-    debug=False,  # Set to True for debugging
+    name='main',
+    debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,  # Set to False to hide console window
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon='fix_hr_prod_logo.png',
 )
