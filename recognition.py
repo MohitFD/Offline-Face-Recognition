@@ -633,26 +633,28 @@ from database import (
     normalize_time,
     get_current_date_str,
     get_current_time_str,
+    get_app_dir,
+    get_data_dir,
 )
 import datetime
 
 # ---------------------- Enhanced Path Management for PyInstaller ----------------------
 
 
-def get_app_dir():
-    """Gets the directory where the .exe or .py file is located"""
-    if getattr(sys, "frozen", False):  # Running as .exe
-        return os.path.dirname(sys.executable)
-    else:
-        return os.path.dirname(os.path.abspath(__file__))
+# def get_app_dir():
+#     """Gets the directory where the .exe or .py file is located"""
+#     if getattr(sys, "frozen", False):  # Running as .exe
+#         return os.path.dirname(sys.executable)
+#     else:
+#         return os.path.dirname(os.path.abspath(__file__))
 
 
-def get_data_dir():
-    """Gets the persistent data directory"""
-    if getattr(sys, "frozen", False):  # Running as .exe
-        return os.path.dirname(sys.executable)
-    else:
-        return os.path.dirname(os.path.abspath(__file__))
+# def get_data_dir():
+#     """Gets the persistent data directory"""
+#     if getattr(sys, "frozen", False):  # Running as .exe
+#         return os.path.dirname(sys.executable)
+#     else:
+#         return os.path.dirname(os.path.abspath(__file__))
 
 
 def get_bundled_resource_path(relative_path):
@@ -908,6 +910,98 @@ face_encodings = []
 face_codes = []
 index = None
 _last_index_codes_snapshot = set()
+_last_dir_signature = None
+_INDEX_FILENAME = "face_index.faiss"
+_CODES_FILENAME = "face_codes.txt"
+_SIG_FILENAME = "face_index.sig"
+
+
+def _compute_dir_signature():
+    """
+    Compute a lightweight signature of the profile images directory
+    based on (filename, size, mtime). Returns a frozenset for quick
+    equality checks. This avoids rebuilding encodings unless files changed.
+    """
+    if not os.path.exists(IMG_DIR):
+        return frozenset()
+
+    supported_exts = (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif")
+    entries = []
+    for name in os.listdir(IMG_DIR):
+        if not name.lower().endswith(supported_exts):
+            continue
+        path = os.path.join(IMG_DIR, name)
+        try:
+            stat = os.stat(path)
+            entries.append((name, stat.st_size, int(stat.st_mtime)))
+        except OSError:
+            # If file disappeared between listdir and stat, skip it
+            continue
+    return frozenset(entries)
+
+
+def _get_index_paths():
+    """Return file paths for persisted index, codes and signature in DATA_DIR."""
+    index_path = os.path.join(DATA_DIR, _INDEX_FILENAME)
+    codes_path = os.path.join(DATA_DIR, _CODES_FILENAME)
+    sig_path = os.path.join(DATA_DIR, _SIG_FILENAME)
+    return index_path, codes_path, sig_path
+
+
+def _save_index_to_disk():
+    """Persist FAISS index, codes and directory signature to disk for fast reloads."""
+    try:
+        if index is None or not face_codes:
+            return False
+        index_path, codes_path, sig_path = _get_index_paths()
+        # Save faiss index
+        faiss.write_index(index, index_path)
+        # Save codes (one per line)
+        with open(codes_path, "w", encoding="utf-8") as f:
+            for code in face_codes:
+                f.write(f"{code}\n")
+        # Save signature (as repr of sorted tuples for determinism)
+        sig = _compute_dir_signature()
+        with open(sig_path, "w", encoding="utf-8") as f:
+            f.write(repr(sorted(list(sig))))
+        print(f"[INFO] Persisted face index to disk at: {index_path}")
+        return True
+    except Exception as e:
+        print(f"[WARNING] Failed to persist face index: {e}")
+        return False
+
+
+def _load_index_from_disk_if_valid():
+    """
+    Try loading a persisted index if signature matches current directory.
+    Returns True if loaded, else False.
+    """
+    global index, face_codes, _last_dir_signature
+    try:
+        index_path, codes_path, sig_path = _get_index_paths()
+        if not (os.path.exists(index_path) and os.path.exists(codes_path) and os.path.exists(sig_path)):
+            return False
+        # Read saved signature
+        with open(sig_path, "r", encoding="utf-8") as f:
+            saved_sig_text = f.read().strip()
+        current_sig = _compute_dir_signature()
+        # Compare by string to avoid ordering differences
+        if saved_sig_text != repr(sorted(list(current_sig))):
+            return False
+        # Load index and codes
+        loaded_index = faiss.read_index(index_path)
+        with open(codes_path, "r", encoding="utf-8") as f:
+            loaded_codes = [line.strip() for line in f if line.strip()]
+        if loaded_index.ntotal != len(loaded_codes):
+            return False
+        index = loaded_index
+        face_codes = loaded_codes
+        _last_dir_signature = current_sig
+        print(f"[INFO] Loaded persisted face index with {len(face_codes)} profiles")
+        return True
+    except Exception as e:
+        print(f"[WARNING] Failed to load persisted face index: {e}")
+        return False
 
 
 def initialize_dummy_index():
@@ -923,7 +1017,7 @@ def initialize_dummy_index():
 
 def rebuild_face_index():
     """Rebuild the face index from current profile images"""
-    global face_encodings, face_codes, index
+    global face_encodings, face_codes, index, _last_dir_signature
 
     print("[INFO] Rebuilding face recognition index...")
 
@@ -946,6 +1040,11 @@ def rebuild_face_index():
         index = new_index
 
         print(f"[INFO] Index ready with {len(face_codes)} profiles")
+
+        # Update directory signature after successful build
+        _last_dir_signature = _compute_dir_signature()
+        # Persist to disk for fast reuse on next app start
+        _save_index_to_disk()
         return True
 
     except Exception as e:
@@ -960,18 +1059,24 @@ def rebuild_face_index():
 # Defer any heavy work until first call
 
 def ensure_model_and_index_ready():
-    global model, index, _last_index_codes_snapshot
+    global model, index, _last_index_codes_snapshot, _last_dir_signature
     if model is None:
         model = load_insightface_model()
     if index is None:
-        # Try real index; fallback to dummy
-        if not rebuild_face_index():
-            initialize_dummy_index()
-            _last_index_codes_snapshot = set([code for code in face_codes])
+        # Try load persisted index; else build; fallback to dummy
+        if not _load_index_from_disk_if_valid():
+            if not rebuild_face_index():
+                initialize_dummy_index()
+                _last_index_codes_snapshot = set([code for code in face_codes])
     else:
-        # Rebuild if images changed
-        if should_rebuild_index():
-            rebuild_face_index()
+        # Rebuild if images actually changed on disk (robust signature)
+        current_sig = _compute_dir_signature()
+        if _last_dir_signature is None:
+            _last_dir_signature = current_sig
+        elif current_sig != _last_dir_signature:
+            # Only then rebuild
+            if rebuild_face_index():
+                _save_index_to_disk()
     if not _last_index_codes_snapshot:
         _last_index_codes_snapshot = set([code for code in face_codes])
 
@@ -1225,11 +1330,18 @@ def detect_and_predict(frame):
 
 def should_rebuild_index():
     """Check if face index needs to be rebuilt due to new images"""
-    global face_codes
+    global face_codes, _last_dir_signature
 
     try:
         if not os.path.exists(IMG_DIR):
             return False
+
+        # Prefer robust signature check; fall back to name-based heuristics
+        current_sig = _compute_dir_signature()
+        if _last_dir_signature is None:
+            _last_dir_signature = current_sig
+        elif current_sig != _last_dir_signature:
+            return True
 
         current_images = [
             f
@@ -1349,3 +1461,36 @@ def test_employee_recognition(emp_code):
 #         if get_employee_by_code(code):
 #             test_employee_recognition(code)
 #             break
+
+# ---------------------- Public Helpers for App Startup or Button ----------------------
+
+def warm_up_recognition():
+    """
+    Load the InsightFace model and ensure a valid index exists without
+    running any detection. Safe to call at startup or on a 'Start Detection' click.
+    """
+    ensure_model_and_index_ready()
+    return {
+        "loaded_faces": len([c for c in face_codes if c != "DUMMY"]),
+        "using_dummy_index": len(face_codes) == 1 and face_codes[0] == "DUMMY",
+        "img_dir": IMG_DIR,
+    }
+
+
+def build_index_now():
+    """
+    Force rebuild the face index immediately (e.g., after adding/removing images).
+    Returns counts and success flag for UI feedback.
+    """
+    # Ensure model is loaded, but avoid unconditional rebuilds
+    ensure_model_and_index_ready()
+    # Only rebuild if index missing or images changed
+    need_rebuild = index is None or should_rebuild_index()
+    ok = True
+    if need_rebuild:
+        ok = rebuild_face_index()
+    return {
+        "success": ok,
+        "profiles": len([c for c in face_codes if c != "DUMMY"]),
+        "img_dir": IMG_DIR,
+    }

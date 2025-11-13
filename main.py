@@ -2241,6 +2241,15 @@ from PyQt5.QtGui import (
     QPalette,
     QResizeEvent,
 )
+from recognition import warm_up_recognition, build_index_now
+
+# Enable high DPI scaling before any QApplication is created
+try:
+    from PyQt5 import QtCore
+    QtCore.QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QtCore.QCoreApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+except Exception:
+    pass
 from fetch_emp_from_fixhr import fetch_and_store_employees
 from login import login_fixhr, is_logged_in, load_session, clear_session
 from database import (
@@ -2251,6 +2260,7 @@ from database import (
     init_db,
     start_background_sync,
     get_sync_status_overview,
+    get_remaining_sync_count,
 )
 from device_info import get_device_info, is_internet_available
 from speak import speak
@@ -2301,6 +2311,65 @@ class LivenessLoaderThread(QThread):
             self.finished.emit(False, f"Failed to load liveness detector: {e}", None)
         except Exception as e:
             self.finished.emit(False, f"Unexpected error loading detector: {e}", None)
+
+class ProfileWarmupThread(QThread):
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def run(self):
+        try:
+            info = warm_up_recognition()
+            self.finished.emit(info)
+        except Exception as e:
+            self.error.emit(str(e))
+
+class BuildIndexThread(QThread):
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def run(self):
+        try:
+            info = build_index_now()
+            self.finished.emit(info)
+        except Exception as e:
+            self.error.emit(str(e))
+
+class ModalLoader(QDialog):
+    def __init__(self, title: str, message: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setFixedSize(360, 160)
+        self.setStyleSheet("""
+            QDialog { background-color: #001F3F; color: #ffffff; }
+            QLabel { color: #ffffff; }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        self.header = QLabel(title)
+        self.header.setAlignment(Qt.AlignCenter)
+        self.header.setStyleSheet("font-size: 16px; font-weight: 600;")
+
+        self.body = QLabel(message)
+        self.body.setAlignment(Qt.AlignCenter)
+        self.body.setWordWrap(True)
+        self.body.setStyleSheet("font-size: 12px; color: #d0d0d0;")
+
+        self.hint = QLabel("Please wait...")
+        self.hint.setAlignment(Qt.AlignCenter)
+        self.hint.setStyleSheet("font-size: 11px; color: #9aa7b2;")
+
+        layout.addWidget(self.header)
+        layout.addStretch(1)
+        layout.addWidget(self.body)
+        layout.addWidget(self.hint)
+        layout.addStretch(1)
+
+        # Center on screen
+        geo = QDesktopWidget().availableGeometry(self)
+        self.move(geo.center() - self.rect().center())
 
 class DetectWorker(QThread):
     result_ready = pyqtSignal(dict)
@@ -3135,17 +3204,21 @@ class AttendanceApp(QWidget):
             self.sidebar.fetch_btn.setEnabled(True)
             self.sidebar.fetch_btn.setText("Fetch Employees")
         if success:
-            if self.liveness_detector_loaded and hasattr(self, "detect_and_predict"):
-                try:
-                    from recognition import force_rebuild_index
-                    rebuild_success = force_rebuild_index()
-                    if rebuild_success:
-                        print("Ready - Faces loaded")
-                    else:
-                        print("Ready - No face images")
-                except Exception:
-                    print("Ready - Index rebuild failed")
-            QMessageBox.information(self, "Success", message)
+            # Show loader and build/rebuild profiles right after fetching employees
+            loader = ModalLoader("Loading Profiles", "Preparing face database for recognition...", self)
+            thread = BuildIndexThread()
+            def on_done(_info):
+                loader.accept()
+                QMessageBox.information(self, "Success", message)
+            def on_err(err):
+                loader.accept()
+                QMessageBox.warning(self, "Profiles", f"Failed to prepare profiles: {err}")
+                QMessageBox.information(self, "Success", message)
+            thread.finished.connect(on_done)
+            thread.error.connect(on_err)
+            thread.start()
+            loader.exec_()
+            thread.wait()
         else:
             print("Fetch failed")
             QMessageBox.critical(self, "Error", f"Failed to fetch employees: {message}")
@@ -3505,7 +3578,8 @@ class AttendanceApp(QWidget):
         return card
 
     def get_pending_sync_count(self):
-        return 8
+        remaining = get_remaining_sync_count()
+        return remaining["remaining_sync_count"]
 
     def refresh_data(self):
         if not is_logged_in():

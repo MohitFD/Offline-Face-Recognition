@@ -7,6 +7,8 @@ import requests
 import threading
 import time
 import shutil
+import pytz
+
 
 
 # ---------------------- Path Utilities ----------------------
@@ -62,10 +64,13 @@ RETRY_DELAY = 5  # Delay between retries in seconds
 # ---------------------- Time Utilities ----------------------
 class OfflinePunchHelper:
     @staticmethod
+    # def get_accurate_indian_time():
+    #     """Get IST time (UTC+5:30) without blocking network calls."""
+    #     utc_now = datetime.datetime.utcnow()
+    #     return utc_now + datetime.timedelta(hours=5, minutes=30)
     def get_accurate_indian_time():
-        """Get IST time (UTC+5:30) without blocking network calls."""
-        utc_now = datetime.datetime.utcnow()
-        return utc_now + datetime.timedelta(hours=5, minutes=30)
+        india_tz = pytz.timezone("Asia/Kolkata")
+        return datetime.datetime.now(india_tz)
 
 
 def get_current_date_str():
@@ -1343,7 +1348,8 @@ def delete_single_attendance_log(emp_code, checkin_date, checkin_time):
 
 def sync_single_record(log, token):
     """Attempt to sync a single record with retries"""
-    url = "https://dev.fixhr.app/api/offline-attendance/syncOfflineAttendance"
+    # url = "https://dev.fixhr.app/api/offline-attendance/syncOfflineAttendance"
+    url = "https://fixhr.app/api/offline-attendance/syncOfflineAttendance"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = log
     print(f"[DEBUG] Syncing record for emp_code={log['emp_code']} on {log['checkin_date']} {log['checkin_time']} with payload: {payload}")
