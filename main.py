@@ -2187,6 +2187,7 @@ import sys
 import cv2
 import datetime
 import importlib.metadata
+import threading
 from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
@@ -2213,6 +2214,13 @@ from PyQt5.QtWidgets import (
     QTableView,
     QGraphicsDropShadowEffect,
     QDesktopWidget,
+    QCheckBox,
+    QTimeEdit,
+    QDateEdit,
+    QRadioButton,
+    QButtonGroup,
+    QGroupBox,
+    QLCDNumber,
 )
 from PyQt5.QtCore import (
     QTimer,
@@ -2221,6 +2229,7 @@ from PyQt5.QtCore import (
     QThread,
     QSize,
     QDate,
+    QTime,
     QPropertyAnimation,
     QEasingCurve,
     QPoint,
@@ -2261,6 +2270,12 @@ from database import (
     start_background_sync,
     get_sync_status_overview,
     get_remaining_sync_count,
+    get_sync_settings,
+    set_setting,
+    get_setting,
+    sync_data_to_server,
+    get_failed_sync_records,
+    retry_failed_sync,
 )
 from device_info import get_device_info, is_internet_available
 from speak import speak
@@ -2334,6 +2349,42 @@ class BuildIndexThread(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+
+class ManualSyncThread(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, sync_mode="both", start_date=None, end_date=None):
+        super().__init__()
+        self.sync_mode = sync_mode
+        self.start_date = start_date
+        self.end_date = end_date
+
+    def run(self):
+        try:
+            result = sync_data_to_server(
+                sync_mode=self.sync_mode,
+                start_date=self.start_date,
+                end_date=self.end_date,
+            )
+        except Exception as exc:
+            result = {"success": False, "message": str(exc)}
+        self.finished.emit(result)
+
+
+class FailedRetryThread(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, record_ids=None):
+        super().__init__()
+        self.record_ids = record_ids
+
+    def run(self):
+        try:
+            result = retry_failed_sync(self.record_ids)
+        except Exception as exc:
+            result = {"success": False, "message": str(exc)}
+        self.finished.emit(result)
+
 class ModalLoader(QDialog):
     def __init__(self, title: str, message: str, parent=None):
         super().__init__(parent)
@@ -2370,6 +2421,365 @@ class ModalLoader(QDialog):
         # Center on screen
         geo = QDesktopWidget().availableGeometry(self)
         self.move(geo.center() - self.rect().center())
+
+
+class SettingsDialog(QDialog):
+    settings_saved = pyqtSignal(dict)
+    sync_completed = pyqtSignal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Sync Settings")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+        self.current_settings = get_sync_settings()
+        self.sync_thread = None
+        self.failed_retry_thread = None
+
+        self.setStyleSheet(
+            """
+            QDialog {
+                background-color: #0f1c2e;
+                color: #e8edf2;
+            }
+            QGroupBox {
+                border: 1px solid #1f3b59;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding: 10px 12px;
+                font-weight: 600;
+                color: #8fdcfe;
+            }
+            QLabel { color: #e8edf2; }
+            QCheckBox, QRadioButton { color: #e8edf2; }
+            QPushButton {
+                background-color: #0078d4;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 18px;
+                color: #ffffff;
+                font-weight: 600;
+            }
+            QPushButton:disabled {
+                background-color: #3a4a60;
+                color: #9aa7b2;
+            }
+            QTimeEdit, QDateEdit {
+                background-color: #12233a;
+                border: 1px solid #1f3b59;
+                border-radius: 4px;
+                padding: 4px 8px;
+                color: #ffffff;
+            }
+            """
+        )
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(16)
+
+        self.auto_group = self._build_auto_sync_group()
+        main_layout.addWidget(self.auto_group)
+
+        self.mode_group_box = self._build_mode_group()
+        main_layout.addWidget(self.mode_group_box)
+
+        self.date_group = self._build_date_range_group()
+        main_layout.addWidget(self.date_group)
+
+        self.failed_group = self._build_failed_queue_group()
+        main_layout.addWidget(self.failed_group)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        self.save_btn = QPushButton("Save Settings")
+        self.save_btn.clicked.connect(self.handle_save)
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.reject)
+        button_row.addWidget(self.save_btn)
+        button_row.addWidget(self.close_btn)
+        main_layout.addLayout(button_row)
+
+        self.clock_timer = QTimer(self)
+        self.clock_timer.timeout.connect(self.update_live_clock)
+        self.clock_timer.start(1000)
+        self.update_auto_sync_ui(self.auto_sync_checkbox.isChecked())
+        self.update_live_clock()
+
+    def _build_auto_sync_group(self):
+        group = QGroupBox("Automatic Sync Scheduler")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(8)
+
+        self.auto_sync_checkbox = QCheckBox("Enable automatic daily sync")
+        self.auto_sync_checkbox.setChecked(self.current_settings["auto_sync_enabled"])
+        self.auto_sync_checkbox.toggled.connect(self.update_auto_sync_ui)
+        layout.addWidget(self.auto_sync_checkbox)
+
+        self.schedule_frame = QFrame()
+        schedule_layout = QHBoxLayout(self.schedule_frame)
+        schedule_layout.setContentsMargins(0, 0, 0, 0)
+        schedule_layout.setSpacing(12)
+
+        time_col = QVBoxLayout()
+        time_label = QLabel("Run every day at:")
+        time_label.setStyleSheet("color: #9aa7b2;")
+        time_col.addWidget(time_label)
+
+        self.time_edit = QTimeEdit()
+        self.time_edit.setDisplayFormat("HH:mm")
+        time_text = self.current_settings["auto_sync_time"]
+        try:
+            hours, minutes = map(int, time_text.split(":"))
+        except ValueError:
+            hours, minutes = (9, 0)
+        self.time_edit.setTime(QTime(hours, minutes))
+        self.time_edit.setStyleSheet("font-size: 16px;")
+        time_col.addWidget(self.time_edit)
+        schedule_layout.addLayout(time_col)
+
+        clock_col = QVBoxLayout()
+        clock_label = QLabel("Current time")
+        clock_label.setStyleSheet("color: #9aa7b2;")
+        clock_col.addWidget(clock_label)
+
+        self.clock_display = QLCDNumber()
+        self.clock_display.setDigitCount(5)
+        self.clock_display.setSegmentStyle(QLCDNumber.Flat)
+        self.clock_display.setStyleSheet(
+            """
+            QLCDNumber {
+                background-color: #12233a;
+                border: 1px solid #1f3b59;
+                border-radius: 4px;
+            }
+            """
+        )
+        clock_col.addWidget(self.clock_display)
+        schedule_layout.addLayout(clock_col)
+
+        layout.addWidget(self.schedule_frame)
+        return group
+
+    def _build_mode_group(self):
+        group = QGroupBox("Sync Mechanism")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(6)
+
+        self.mode_button_group = QButtonGroup(self)
+        modes = [
+            ("both", "Sync both check-in and check-out data"),
+            ("checkin", "Sync only check-in punches"),
+            # ("checkout", "Sync only check-out punches"),
+        ]
+        self.mode_buttons = {}
+
+        for key, label in modes:
+            btn = QRadioButton(label)
+            btn.setProperty("mode_key", key)
+            self.mode_button_group.addButton(btn)
+            self.mode_buttons[key] = btn
+            layout.addWidget(btn)
+
+        active_mode = self.current_settings["sync_mode"]
+        if active_mode not in self.mode_buttons:
+            active_mode = "both"
+        self.mode_buttons[active_mode].setChecked(True)
+        return group
+
+    def _build_date_range_group(self):
+        group = QGroupBox("Sync Historical Date Range")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(10)
+
+        picker_row = QHBoxLayout()
+        picker_row.setSpacing(10)
+
+        start_col = QVBoxLayout()
+        start_label = QLabel("Start date")
+        start_label.setStyleSheet("color: #9aa7b2;")
+        start_col.addWidget(start_label)
+
+        self.start_date_edit = QDateEdit()
+        self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setDisplayFormat("dd-MM-yyyy")
+        self.start_date_edit.setDate(QDate.currentDate().addDays(-1))
+        start_col.addWidget(self.start_date_edit)
+        picker_row.addLayout(start_col)
+
+        end_col = QVBoxLayout()
+        end_label = QLabel("End date")
+        end_label.setStyleSheet("color: #9aa7b2;")
+        end_col.addWidget(end_label)
+
+        self.end_date_edit = QDateEdit()
+        self.end_date_edit.setCalendarPopup(True)
+        self.end_date_edit.setDisplayFormat("dd-MM-yyyy")
+        self.end_date_edit.setDate(QDate.currentDate())
+        end_col.addWidget(self.end_date_edit)
+        picker_row.addLayout(end_col)
+
+        layout.addLayout(picker_row)
+
+        self.date_range_sync_btn = QPushButton("Sync Selected Range")
+        self.date_range_sync_btn.clicked.connect(self.handle_range_sync)
+        layout.addWidget(self.date_range_sync_btn, alignment=Qt.AlignLeft)
+
+        self.date_range_status = QLabel("")
+        self.date_range_status.setWordWrap(True)
+        self.date_range_status.setStyleSheet("color: #9aa7b2; font-size: 11px;")
+        layout.addWidget(self.date_range_status)
+
+        return group
+
+    def _build_failed_queue_group(self):
+        group = QGroupBox("Failed Sync Queue")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(8)
+
+        self.failed_queue_table = QTableWidget()
+        self.failed_queue_table.setColumnCount(6)
+        self.failed_queue_table.setHorizontalHeaderLabels(
+            ["Emp Code", "Date", "Time", "Attempts", "Last Attempt", "Error"]
+        )
+        self.failed_queue_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.failed_queue_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.failed_queue_table.setSelectionMode(QTableWidget.MultiSelection)
+        layout.addWidget(self.failed_queue_table)
+
+        btn_row = QHBoxLayout()
+        self.retry_failed_btn = QPushButton("Retry Selected")
+        self.retry_failed_btn.clicked.connect(self.handle_retry_failed)
+        self.refresh_failed_btn = QPushButton("Refresh")
+        self.refresh_failed_btn.clicked.connect(self.load_failed_queue)
+        btn_row.addWidget(self.retry_failed_btn)
+        btn_row.addWidget(self.refresh_failed_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        self.failed_status = QLabel("")
+        self.failed_status.setStyleSheet("color: #9aa7b2; font-size: 11px;")
+        layout.addWidget(self.failed_status)
+
+        self.load_failed_queue()
+        return group
+
+    def update_auto_sync_ui(self, checked):
+        self.schedule_frame.setVisible(bool(checked))
+
+    def update_live_clock(self):
+        now = datetime.datetime.now()
+        self.clock_display.display(now.strftime("%H:%M"))
+
+    def get_selected_mode(self):
+        button = self.mode_button_group.checkedButton()
+        if button:
+            return button.property("mode_key")
+        return "both"
+
+    def handle_save(self):
+        auto_enabled = "1" if self.auto_sync_checkbox.isChecked() else "0"
+        auto_time = self.time_edit.time().toString("HH:mm")
+        selected_mode = self.get_selected_mode()
+
+        set_setting("auto_sync_enabled", auto_enabled)
+        set_setting("auto_sync_time", auto_time)
+        set_setting("sync_mode", selected_mode)
+        set_setting("auto_sync_last_run", "")
+
+        updated = get_sync_settings()
+        self.current_settings = updated
+        self.settings_saved.emit(updated)
+        QMessageBox.information(self, "Settings Saved", "Sync preferences updated successfully.")
+
+    def handle_range_sync(self):
+        if self.sync_thread and self.sync_thread.isRunning():
+            QMessageBox.information(self, "Sync Running", "Please wait for the current sync to finish.")
+            return
+
+        start_date = self.start_date_edit.date()
+        end_date = self.end_date_edit.date()
+        if start_date > end_date:
+            QMessageBox.warning(self, "Invalid Range", "Start date must be before end date.")
+            return
+
+        start_str = start_date.toString("dd-MM-yyyy")
+        end_str = end_date.toString("dd-MM-yyyy")
+        mode = self.get_selected_mode()
+
+        self.date_range_sync_btn.setEnabled(False)
+        self.date_range_status.setText(
+            f"Syncing logs from {start_str} to {end_str} ({mode}) ..."
+        )
+
+        self.sync_thread = ManualSyncThread(sync_mode=mode, start_date=start_str, end_date=end_str)
+        self.sync_thread.finished.connect(self.on_range_sync_finished)
+        self.sync_thread.start()
+
+    def on_range_sync_finished(self, result):
+        self.date_range_sync_btn.setEnabled(True)
+        self.sync_thread = None
+        self.date_range_status.setText(result.get("message", "Sync finished"))
+        if result.get("success"):
+            QMessageBox.information(self, "Sync Complete", result.get("message", "Sync completed successfully."))
+        else:
+            QMessageBox.warning(self, "Sync Issue", result.get("message", "Sync failed. Please check logs."))
+        self.sync_completed.emit(result)
+        self.load_failed_queue()
+
+    def load_failed_queue(self):
+        if not hasattr(self, "failed_queue_table"):
+            return
+        records = get_failed_sync_records()
+        self.failed_queue_table.setRowCount(0)
+        for row_idx, rec in enumerate(records):
+            self.failed_queue_table.insertRow(row_idx)
+            for col, value in enumerate(
+                [
+                    rec["emp_code"],
+                    rec["checkin_date"],
+                    rec["checkin_time"],
+                    str(rec["attempts"]),
+                    rec["last_attempt_at"] or "-",
+                    rec["error_message"] or "-",
+                ]
+            ):
+                item = QTableWidgetItem(value)
+                if col == 5:
+                    item.setToolTip(value)
+                item.setData(Qt.UserRole, rec["id"])
+                self.failed_queue_table.setItem(row_idx, col, item)
+        self.failed_status.setText(f"{len(records)} failed record(s) in queue.")
+
+    def handle_retry_failed(self):
+        if self.failed_retry_thread and self.failed_retry_thread.isRunning():
+            QMessageBox.information(self, "Retry Running", "A retry job is already running.")
+            return
+        selected = self.failed_queue_table.selectionModel().selectedRows()
+        if not selected:
+            QMessageBox.information(self, "Select Records", "Please select at least one row to retry.")
+            return
+        record_ids = []
+        for idx in selected:
+            item = self.failed_queue_table.item(idx.row(), 0)
+            if item:
+                record_ids.append(item.data(Qt.UserRole))
+        self.retry_failed_btn.setEnabled(False)
+        self.failed_status.setText("Retrying selected failed records...")
+        self.failed_retry_thread = FailedRetryThread(record_ids)
+        self.failed_retry_thread.finished.connect(self.on_retry_finished)
+        self.failed_retry_thread.start()
+
+    def on_retry_finished(self, result):
+        self.retry_failed_btn.setEnabled(True)
+        self.failed_retry_thread = None
+        self.failed_status.setText(result.get("message", "Retry finished"))
+        if result.get("success"):
+            QMessageBox.information(self, "Retry Complete", result.get("message", "Retry completed successfully."))
+        else:
+            QMessageBox.warning(self, "Retry Issue", result.get("message", "Retry failed."))
+        self.load_failed_queue()
+        self.sync_completed.emit(result)
 
 class DetectWorker(QThread):
     result_ready = pyqtSignal(dict)
@@ -2713,53 +3123,123 @@ class Sidebar(QFrame):
                 shadow.setColor(QColor(0, 0, 0, 100))
                 button.setGraphicsEffect(shadow)
 
-            self.fetch_btn = QPushButton("Fetch Employees")
+            # Horizontal layout for icon buttons
+            icon_buttons_layout = QHBoxLayout()
+            icon_buttons_layout.setSpacing(8)
+            icon_buttons_layout.setContentsMargins(0, 0, 0, 0)
+
+            # Fetch Employees Icon Button
+            self.fetch_btn = QToolButton()
+            self.fetch_btn.setIcon(self.style().standardIcon(QStyle.SP_ArrowDown))
+            self.fetch_btn.setIconSize(QSize(20, 20))
+            self.fetch_btn.setToolTip("Fetch Employees")
             self.fetch_btn.setCursor(QCursor(Qt.PointingHandCursor))
-            self.fetch_btn.setFont(QFont("Segoe UI", 8, QFont.Bold))
-            self.fetch_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.fetch_btn.setFixedSize(36, 36)
             self.fetch_btn.setStyleSheet("""
-                QPushButton {
+                QToolButton {
                     background-color: #002F5E;
                     color: white;
                     border: none;
-                    padding: 6px 10px;
-                    border-radius: 4px;
-                    font-size: 10px;
+                    border-radius: 6px;
+                    padding: 0px;
                 }
-                QPushButton:hover {
+                QToolButton:hover {
                     background-color: #004080;
                 }
-                QPushButton:pressed {
+                QToolButton:pressed {
                     background-color: #001F3F;
                 }
             """)
             add_shadow(self.fetch_btn)
             self.fetch_btn.clicked.connect(lambda: self.parent().fetch_employees())
-            layout.addWidget(self.fetch_btn, alignment=Qt.AlignLeft)
+            icon_buttons_layout.addWidget(self.fetch_btn)
 
-            self.sync_btn = QPushButton("Sync Attendance")
+            # Sync Attendance Icon Button
+            self.sync_btn = QToolButton()
+            self.sync_btn.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+            self.sync_btn.setIconSize(QSize(20, 20))
+            self.sync_btn.setToolTip("Sync Attendance")
             self.sync_btn.setCursor(QCursor(Qt.PointingHandCursor))
-            self.sync_btn.setFont(QFont("Segoe UI", 8, QFont.Bold))
-            self.sync_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.sync_btn.setFixedSize(36, 36)
             self.sync_btn.setStyleSheet("""
-                QPushButton {
+                QToolButton {
                     background-color: #002F5E;
                     color: white;
                     border: none;
-                    padding: 6px 10px;
-                    border-radius: 4px;
-                    font-size: 10px;
+                    border-radius: 6px;
+                    padding: 0px;
                 }
-                QPushButton:hover {
+                QToolButton:hover {
                     background-color: #004080;
                 }
-                QPushButton:pressed {
+                QToolButton:pressed {
                     background-color: #001F3F;
                 }
             """)
             add_shadow(self.sync_btn)
             self.sync_btn.clicked.connect(self.start_sync)
-            layout.addWidget(self.sync_btn, alignment=Qt.AlignLeft)
+            icon_buttons_layout.addWidget(self.sync_btn)
+
+            # # Settings Icon Button
+            # self.settings_btn = QToolButton()
+            # self.settings_btn.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
+            # self.settings_btn.setIconSize(QSize(20, 20))
+            # self.settings_btn.setToolTip("Settings")
+            # self.settings_btn.setCursor(QCursor(Qt.PointingHandCursor))
+            # self.settings_btn.setFixedSize(36, 36)
+            # self.settings_btn.setStyleSheet("""
+            #     QToolButton {
+            #         background-color: #002F5E;
+            #         color: white;
+            #         border: none;
+            #         border-radius: 6px;
+            #     }
+            #     QToolButton:hover {
+            #         background-color: #004080;
+            #     }
+            #     QToolButton:pressed {
+            #         background-color: #001F3F;
+            #     }
+            # """)
+            # add_shadow(self.settings_btn)
+            # self.settings_btn.clicked.connect(self.open_settings)
+            # icon_buttons_layout.addWidget(self.settings_btn)
+
+            # icon_buttons_layout.addStretch()
+            # layout.addLayout(icon_buttons_layout)
+
+           # Settings Icon Button
+            self.settings_btn = QToolButton()
+            self.settings_btn.setText("⚙")  # Gear icon
+            self.settings_btn.setFont(QFont("Segoe UI Symbol", 18))  # Adjust size
+            self.settings_btn.setToolTip("Settings")
+            self.settings_btn.setCursor(QCursor(Qt.PointingHandCursor))
+            self.settings_btn.setFixedSize(36, 36)
+            self.settings_btn.setStyleSheet("""
+                QToolButton {
+                    background-color: #002F5E;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    font-size: 18px;
+                    qproperty-iconSize: 20px; 
+                    padding: 0px;
+                }
+                QToolButton:hover {
+                    background-color: #004080;
+                }
+                QToolButton:pressed {
+                    background-color: #001F3F;
+                }
+            """)
+            add_shadow(self.settings_btn)
+            self.settings_btn.clicked.connect(self.open_settings)
+            icon_buttons_layout.addWidget(self.settings_btn)
+
+            icon_buttons_layout.addStretch()
+            layout.addLayout(icon_buttons_layout)
+
+
 
         layout.addStretch()
 
@@ -2827,6 +3307,11 @@ class Sidebar(QFrame):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to start attendance sync: {str(e)}")
 
+    def open_settings(self):
+        parent = self.parent()
+        if parent and hasattr(parent, "open_settings_dialog"):
+            parent.open_settings_dialog()
+
     def on_date_selected(self):
         selected_date = self.calendar.selectedDate().toString("dd-MM-yyyy")
         self.date_selected.emit(selected_date)
@@ -2846,6 +3331,8 @@ class Sidebar(QFrame):
                 self.fetch_btn.show()
             if hasattr(self, 'sync_btn'):
                 self.sync_btn.show()
+            if hasattr(self, 'settings_btn'):
+                self.settings_btn.show()
             self.is_collapsed = False
         else:
             self.setFixedWidth(self.collapsed_width)
@@ -2861,6 +3348,8 @@ class Sidebar(QFrame):
                 self.fetch_btn.hide()
             if hasattr(self, 'sync_btn'):
                 self.sync_btn.hide()
+            if hasattr(self, 'settings_btn'):
+                self.settings_btn.hide()
             self.is_collapsed = True
 
     def set_active_button(self, button_name):
@@ -3059,12 +3548,20 @@ class AttendanceApp(QWidget):
         self._detect_worker = None
         self.attendance_data = []
         self.cap = None
+        self.auto_sync_timer = QTimer(self)
+        self.auto_sync_timer.timeout.connect(self.check_auto_sync_schedule)
+        self.guest_refresh_timer = QTimer(self)
+        self.guest_refresh_timer.timeout.connect(self.update_guest_table)
+        self.sync_settings = get_sync_settings()
+        self.auto_sync_enabled = self.sync_settings["auto_sync_enabled"]
+        self.auto_sync_time = self.sync_settings["auto_sync_time"]
         self.init_ui()
         self.init_timers()
         self.load_liveness_detector_async()
         self.backup_manager = BackupManager(
             db_path=resource_path("employees.db"),
         )
+        self.apply_sync_settings(self.sync_settings)
         if is_logged_in():
             self.session = load_session()
             self.show_admin_view()
@@ -3101,6 +3598,11 @@ class AttendanceApp(QWidget):
 
     def show_admin_view(self):
         self.right_panel.setVisible(True)
+        if hasattr(self, "guest_table_panel"):
+            self.guest_table_panel.setVisible(False)
+            self.right_panel.setVisible(True)
+        if hasattr(self, "guest_refresh_timer"):
+            self.guest_refresh_timer.stop()
         self.admin_login_btn.setText("Admin: Logged In")
         self.admin_login_btn.setStyleSheet(
             """
@@ -3118,6 +3620,9 @@ class AttendanceApp(QWidget):
         self.data_refresh_timer.start(10000)
         self.left_panel.update()
         self.right_panel.update()
+        self.apply_sync_settings()
+        if hasattr(self, "guest_table"):
+            self.guest_table.hide()
 
     def show_guest_view(self):
         """Enhanced show_guest_view method with responsive design"""
@@ -3133,6 +3638,60 @@ class AttendanceApp(QWidget):
         self.employee_card.update_value("[Employee Name]")
         self.data_refresh_timer.stop()
         self.update_face_detection_layout()
+        if hasattr(self, "auto_sync_timer"):
+            self.auto_sync_timer.stop()
+        if hasattr(self, "guest_table_panel"):
+            self.guest_table_panel.setVisible(True)
+            self.right_panel.setVisible(False)
+            self.update_guest_table()
+        if hasattr(self, "guest_refresh_timer"):
+            self.guest_refresh_timer.start(30000)
+
+    def apply_sync_settings(self, settings=None):
+        settings = settings or get_sync_settings()
+        self.sync_settings = settings
+        self.auto_sync_enabled = settings["auto_sync_enabled"]
+        self.auto_sync_time = settings["auto_sync_time"]
+        if self.auto_sync_enabled and is_logged_in():
+            if not self.auto_sync_timer.isActive():
+                self.auto_sync_timer.start(60000)
+        else:
+            self.auto_sync_timer.stop()
+
+    def check_auto_sync_schedule(self):
+        if not getattr(self, "auto_sync_enabled", False):
+            return
+        if not is_logged_in():
+            return
+        target_time = self.auto_sync_time or "09:00"
+        try:
+            target_hour, target_minute = [int(v) for v in target_time.split(":")]
+        except ValueError:
+            target_hour, target_minute = 9, 0
+        now = datetime.datetime.now()
+        today_str = now.strftime("%d-%m-%Y")
+        last_run = get_setting("auto_sync_last_run", "")
+        if last_run == today_str:
+            return
+        if (now.hour, now.minute) >= (target_hour, target_minute):
+            print(f"[INFO] Auto sync triggered at {now.strftime('%H:%M')} with mode {self.sync_settings['sync_mode']}")
+            start_background_sync()
+            threading.Thread(target=retry_failed_sync, daemon=True).start()
+            set_setting("auto_sync_last_run", today_str)
+            self.refresh_data()
+
+    def open_settings_dialog(self):
+        if not is_logged_in():
+            QMessageBox.warning(self, "Admin Required", "Please log in to configure sync settings.")
+            return
+        dialog = SettingsDialog(self)
+        dialog.settings_saved.connect(self.on_settings_updated)
+        dialog.sync_completed.connect(lambda _: self.refresh_data())
+        dialog.exec_()
+
+    def on_settings_updated(self, settings):
+        self.apply_sync_settings(settings)
+        self.refresh_data()
 
     def create_circular_mask(self, width, height):
         region = QRegion(0, 0, width, height, QRegion.Ellipse)
@@ -3141,6 +3700,107 @@ class AttendanceApp(QWidget):
     def create_rectangular_mask(self, width, height):
         region = QRegion(0, 0, width, height, QRegion.Rectangle)
         return region
+
+    def build_guest_table_panel(self):
+        panel = QFrame()
+        panel.setStyleSheet(
+            """
+            QFrame {
+                background-color: #ffffff;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+            }
+            """
+        )
+        panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(12, 12, 12, 12)
+        panel_layout.setSpacing(8)
+
+        title = QLabel("Today's Attendance Snapshot")
+        title.setStyleSheet("font-size: 12px; font-weight: 600; color: #212121;")
+        panel_layout.addWidget(title)
+
+        self.guest_table = QTableWidget()
+        self.guest_table.setColumnCount(8)
+        self.guest_table.setHorizontalHeaderLabels(
+            [
+                "Date",
+                "Emp Code",
+                "Name",
+                "Check-in",
+                "Check-out",
+                "Status",
+                "Mode",
+                "Sync",
+            ]
+        )
+        header = self.guest_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        self.guest_table.setAlternatingRowColors(True)
+        self.guest_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.guest_table.verticalHeader().setVisible(False)
+        self.guest_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.guest_table.setFocusPolicy(Qt.NoFocus)
+        self.guest_table.setStyleSheet(
+            """
+            QTableWidget {
+                background-color: #ffffff;
+                border: 1px solid #e0e0e0;
+                border-radius: 4px;
+                font-size: 9px;
+                color: #333333;
+            }
+            QHeaderView::section {
+                background: #f5f5f5;
+                border: none;
+                font-size: 9px;
+                color: #555555;
+                padding: 4px;
+            }
+            """
+        )
+        self.guest_table.setMaximumHeight(240)
+        panel_layout.addWidget(self.guest_table)
+
+        self.guest_table_hint = QLabel("")
+        self.guest_table_hint.setStyleSheet("font-size: 9px; color: #757575;")
+        panel_layout.addWidget(self.guest_table_hint)
+
+        return panel
+
+    def update_guest_table(self):
+        if not hasattr(self, "guest_table") or not self.guest_table.isVisible():
+            return
+        logs = get_attendance_logs()
+        self.guest_table.setRowCount(0)
+        max_rows = 12
+        for idx, log in enumerate(logs[:max_rows]):
+            self.guest_table.insertRow(idx)
+            row_data = [
+                format_date_ddmmyy(log["checkin_date"]),
+                str(log["emp_code"]),
+                log["emp_full_name"],
+                log["checkin_time"],
+                log["checkout_time"] if log["checkout_time"] else "-",
+                log["status"] if log["status"] else "Pending",
+                log.get("mode", "Offline-Face"),
+                "Synced" if log.get("sync", 0) == 1 else "Not Synced",
+            ]
+            for col, text in enumerate(row_data):
+                item = QTableWidgetItem(text)
+                self.guest_table.setItem(idx, col, item)
+        if logs:
+            self.guest_table_hint.setText(f"Showing {min(len(logs), max_rows)} record(s) for today.")
+        else:
+            self.guest_table_hint.setText("No punches yet today.")
 
     def closeEvent(self, event):
         if hasattr(self, "backup_manager"):
@@ -3153,6 +3813,8 @@ class AttendanceApp(QWidget):
             self.detect_timer.stop()
         if hasattr(self, "data_refresh_timer"):
             self.data_refresh_timer.stop()
+        if hasattr(self, "auto_sync_timer"):
+            self.auto_sync_timer.stop()
         if hasattr(self, "fetch_thread") and self.fetch_thread:
             self.fetch_thread.quit()
             self.fetch_thread.wait()
@@ -3192,7 +3854,6 @@ class AttendanceApp(QWidget):
             )
             return
         self.sidebar.fetch_btn.setEnabled(False)
-        self.sidebar.fetch_btn.setText("Fetching...")
         self.fetch_thread = FetchThread(self.session.get("token", ""))
         self.fetch_thread.finished.connect(
             lambda success, msg: self.on_fetch_completed(success, msg)
@@ -3202,7 +3863,6 @@ class AttendanceApp(QWidget):
     def on_fetch_completed(self, success, message):
         if hasattr(self.sidebar, 'fetch_btn'):
             self.sidebar.fetch_btn.setEnabled(True)
-            self.sidebar.fetch_btn.setText("Fetch Employees")
         if success:
             # Show loader and build/rebuild profiles right after fetching employees
             loader = ModalLoader("Loading Profiles", "Preparing face database for recognition...", self)
@@ -3244,116 +3904,59 @@ class AttendanceApp(QWidget):
             old_sidebar.deleteLater()
             self.sidebar = new_sidebar
             QMessageBox.information(self, "Success", "Successfully logged out!")
-            print("Logged out successfully - showing guest view with centered face detection")
+            print("Logged out successfully - showing compact guest view")
 
     def update_face_detection_layout(self):
-        """Responsive guest view layout"""
-        self.content_layout.setAlignment(self.left_panel, Qt.AlignTop | Qt.AlignCenter)
+        """Responsive guest view layout - centered with compact size"""
+        self.content_layout.setAlignment(self.left_panel, Qt.AlignTop | Qt.AlignHCenter)
         
-        # Responsive panel sizing
+        # Use compact sizes (same as admin view but centered)
         window_width = self.width()
         if window_width < 1024:
-            panel_width = min(800, window_width - 100)
-            panel_height = 600
-            camera_size = 400
-            video_size = 380
+            panel_width = 350
+            camera_size = 250
+            video_size = 230
         elif window_width < 1366:
-            panel_width = 1000
-            panel_height = 700
-            camera_size = 500
-            video_size = 480
+            panel_width = 400
+            camera_size = 300
+            video_size = 280
         else:
-            panel_width = 1200
-            panel_height = 900
-            camera_size = 650
-            video_size = 630
+            panel_width = 500
+            camera_size = 350
+            video_size = 330
         
         self.left_panel.setFixedWidth(panel_width)
-        self.left_panel.setFixedHeight(panel_height)
-        
+        self.left_panel.setMaximumHeight(16777215)
         self.left_panel.setStyleSheet("""
             QFrame { 
-                border: 2px solid #dee2e6;
-                border-radius: 20px;
+                background-color: #ffffff;
+                border: none;
             }
         """)
         
-        panel_shadow = QGraphicsDropShadowEffect()
-        panel_shadow.setBlurRadius(25)
-        panel_shadow.setXOffset(5)
-        panel_shadow.setYOffset(5)
-        panel_shadow.setColor(QColor(0, 0, 0, 60))
-        self.left_panel.setGraphicsEffect(panel_shadow)
-        
-        # Responsive camera positioning
-        camera_x = (panel_width - camera_size) // 4
-        camera_y = (panel_height - camera_size) // 2 - 50
+        # Remove any shadow effects for compact view
+        if hasattr(self.left_panel, 'graphicsEffect'):
+            self.left_panel.setGraphicsEffect(None)
         
         self.camera_container.setFixedSize(camera_size, camera_size)
         self.video_label.setFixedSize(video_size, video_size)
         self.video_label.setMask(self.create_circular_mask(video_size, video_size))
         
-        self.camera_container.move(camera_x, camera_y)
+        # Compact positioning within the centered panel
+        self.live_label.move(10, 15)
+        self.live_dot.move(0, 15)
+        self.employee_card.move(max(0, panel_width - 260), camera_size + 20)
+        self.device_info_label.move(10, camera_size + 60)
+        self.camera_container.move((panel_width - camera_size) // 2, 50)
         
+        # Remove guest datetime display if exists (not needed in compact view)
+        if hasattr(self, 'guest_date_label'):
+            self.guest_date_label.hide()
+        if hasattr(self, 'guest_time_label'):
+            self.guest_time_label.hide()
         
-        camera_shadow = QGraphicsDropShadowEffect()
-        camera_shadow.setBlurRadius(20)
-        camera_shadow.setXOffset(3)
-        camera_shadow.setYOffset(3)
-        camera_shadow.setColor(QColor(0, 123, 255, 80))
-        self.camera_container.setGraphicsEffect(camera_shadow)
-        
-        # Responsive positioning of other elements
-        live_x = camera_x + 10
-        live_y = camera_y - 30
-        
-        self.live_label.move(live_x + 40, live_y)
-        self.live_label.setStyleSheet("""
-            font-size: 16px;
-            font-weight: 700;
-            color: #28a745;
-            border: none;
-            background: rgba(255, 255, 255, 0.9);
-            padding: 6px 12px;
-            border-radius: 10px;
-        """)
-        
-        self.live_dot.move(live_x, live_y)
-        self.live_dot.setStyleSheet("""
-            QLabel {
-                background-color: #28a745;
-                border-radius: 12px;
-                border: 3px solid #d4edda;
-            }
-        """)
-        self.live_dot.setFixedSize(24, 24)
-        
-        # Responsive employee card positioning
-        card_x = camera_x + camera_size + 20
-        card_y = camera_y
-        
-        # self.employee_card.setFixedSize(min(250, panel_width - card_x - 20), 80)
-        self.employee_card.move(card_x, card_y)
-        
-        # Responsive device info positioning
-        device_x = camera_x
-        device_y = camera_y + camera_size + 20
-        
-        self.device_info_label.move(device_x, device_y)
-        self.device_info_label.setStyleSheet("""
-            font-size: 12px; 
-            font-weight: 600; 
-            color: #495057; 
-            border: none; 
-            margin-top: 5px;
-            background: rgba(255, 255, 255, 0.9);
-            padding: 12px;
-            border-radius: 10px;
-            border: 1px solid #dee2e6;
-        """)
-        
-        self.create_guest_datetime_display()
-        print("Responsive guest view layout updated")
+        self.left_panel.update()
+        print("Centered compact guest view layout updated")
 
     def create_guest_datetime_display(self):
         """Responsive date and time display"""
@@ -3586,7 +4189,9 @@ class AttendanceApp(QWidget):
             return
         try:
             self.create_overview_cards()
-            self.alert_msg.setText(f"{self.get_pending_sync_count()} records pending sync")
+            pending = self.get_pending_sync_count()
+            failed = len(get_failed_sync_records())
+            self.alert_msg.setText(f"{pending} pending sync | {failed} failed")
         except Exception as e:
             print(f"Error refreshing cards: {e}")
 
@@ -3776,6 +4381,7 @@ class AttendanceApp(QWidget):
         left_layout = QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(6, 0, 6, 6)
         left_layout.setSpacing(0)
+        self.left_layout = left_layout
 
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
@@ -3913,6 +4519,10 @@ class AttendanceApp(QWidget):
         left_layout.addLayout(button_layout)
 
         self.content_layout.addWidget(self.left_panel)
+
+        self.guest_table_panel = self.build_guest_table_panel()
+        self.guest_table_panel.setVisible(False)
+        self.left_layout.addWidget(self.guest_table_panel)
 
         self.right_panel = ModernCard()
         self.right_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -4316,6 +4926,8 @@ class AttendanceApp(QWidget):
                 speak("Hello " + name)
                 if is_logged_in():
                     self.daily_table.scrollToTop()
+                elif hasattr(self, "guest_table") and self.guest_table.isVisible():
+                    self.update_guest_table()
             else:
                 name = result.get("emp_full_name", "Unknown")
                 self.employee_card.update_value(name)

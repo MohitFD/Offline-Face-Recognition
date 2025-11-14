@@ -8,6 +8,7 @@ import threading
 import time
 import shutil
 import pytz
+import json
 
 
 
@@ -58,6 +59,32 @@ IS_SYNCING = False  # Flag to track if sync is in progress
 SYNC_INTERVAL = 300  # Sync interval in seconds (5 minutes, unused now)
 RETRY_ATTEMPTS = 3  # Number of retry attempts for failed syncs
 RETRY_DELAY = 5  # Delay between retries in seconds
+
+DEFAULT_APP_SETTINGS = {
+    "auto_sync_enabled": "0",
+    "auto_sync_time": "09:00",
+    "sync_mode": "both",
+    "auto_sync_last_run": "",
+}
+
+
+def ensure_app_settings(cursor):
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """
+    )
+    for key, value in DEFAULT_APP_SETTINGS.items():
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO app_settings (key, value)
+            VALUES (?, ?)
+            """,
+            (key, value),
+        )
 
 
 
@@ -135,6 +162,23 @@ def normalize_time(time_input):
         return time_input.strftime("%H:%M:%S")
 
     return str(time_input)
+
+
+def _parse_storage_date(date_text):
+    try:
+        return datetime.datetime.strptime(date_text, "%d-%m-%Y").date()
+    except Exception:
+        return None
+
+
+def _date_from_input(date_input):
+    if date_input in (None, ""):
+        return None
+    try:
+        normalized = normalize_date(date_input)
+        return datetime.datetime.strptime(normalized, "%d-%m-%Y").date()
+    except Exception:
+        return None
 
 
 
@@ -244,6 +288,22 @@ def init_db():
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_fail_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            emp_code TEXT NOT NULL,
+            checkin_date TEXT NOT NULL,
+            checkin_time TEXT NOT NULL,
+            payload TEXT,
+            error_message TEXT,
+            attempts INTEGER DEFAULT 0,
+            last_attempt_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(emp_code, checkin_date, checkin_time)
+        )
+        """
+    )
+    ensure_app_settings(cursor)
 
     cursor.execute(
         """
@@ -990,6 +1050,131 @@ def get_employee_count():
     return count
 
 
+def get_setting(key, default=None):
+    """Retrieve application setting value"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT value FROM app_settings WHERE key = ?",
+        (key,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if row is None:
+        return default
+    return row[0]
+
+
+def set_setting(key, value):
+    """Persist application setting value"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO app_settings (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, str(value)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_sync_settings():
+    """Return consolidated sync settings"""
+    enabled = get_setting("auto_sync_enabled", DEFAULT_APP_SETTINGS["auto_sync_enabled"])
+    auto_time = get_setting("auto_sync_time", DEFAULT_APP_SETTINGS["auto_sync_time"])
+    mode = get_setting("sync_mode", DEFAULT_APP_SETTINGS["sync_mode"])
+    last_run = get_setting("auto_sync_last_run", DEFAULT_APP_SETTINGS["auto_sync_last_run"])
+    return {
+        "auto_sync_enabled": enabled == "1",
+        "auto_sync_time": auto_time or DEFAULT_APP_SETTINGS["auto_sync_time"],
+        "sync_mode": (mode or "both").lower(),
+        "auto_sync_last_run": last_run or "",
+    }
+
+
+def record_sync_failure(log, error_message, attempts=1):
+    """Store or update failed sync payload"""
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("PRAGMA busy_timeout = 10000")
+    cursor = conn.cursor()
+    try:
+        payload = json.dumps(log)
+    except Exception:
+        payload = ""
+    cursor.execute(
+        """
+        INSERT INTO sync_fail_queue (
+            emp_code, checkin_date, checkin_time, payload, error_message, attempts, last_attempt_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(emp_code, checkin_date, checkin_time)
+        DO UPDATE SET
+            payload = excluded.payload,
+            error_message = excluded.error_message,
+            attempts = excluded.attempts,
+            last_attempt_at = CURRENT_TIMESTAMP
+        """,
+        (
+            log.get("emp_code"),
+            log.get("checkin_date"),
+            log.get("checkin_time"),
+            payload,
+            error_message,
+            attempts,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def clear_failed_sync(emp_code, checkin_date, checkin_time):
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("PRAGMA busy_timeout = 10000")
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        DELETE FROM sync_fail_queue
+        WHERE emp_code = ? AND checkin_date = ? AND checkin_time = ?
+        """,
+        (emp_code, checkin_date, checkin_time),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_failed_sync_records():
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("PRAGMA busy_timeout = 10000")
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, emp_code, checkin_date, checkin_time, attempts, last_attempt_at, error_message, payload
+        FROM sync_fail_queue
+        ORDER BY last_attempt_at DESC
+        """
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    records = []
+    for row in rows:
+        records.append(
+            {
+                "id": row[0],
+                "emp_code": row[1],
+                "checkin_date": row[2],
+                "checkin_time": row[3],
+                "attempts": row[4],
+                "last_attempt_at": row[5],
+                "error_message": row[6],
+                "payload": row[7],
+            }
+        )
+    return records
+
+
 # ---------------------- Utility Functions ----------------------
 def get_sqlite_version():
     """Return SQLite database engine version"""
@@ -1198,8 +1383,8 @@ def get_session_token():
     return token
 
 
-def get_daily_attendance_logs():
-    """Fetch all data from daily_attendance_logs"""
+def get_daily_attendance_logs(sync_mode="both", start_date=None, end_date=None):
+    """Fetch data from daily_attendance_logs with optional filters"""
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("PRAGMA busy_timeout = 10000")
     cursor = conn.cursor()
@@ -1213,8 +1398,27 @@ def get_daily_attendance_logs():
     results = cursor.fetchall()
     conn.close()
 
+    sync_mode = (sync_mode or "both").lower()
+    if sync_mode not in ("both", "checkin", "checkout"):
+        sync_mode = "both"
+
+    start_dt = _date_from_input(start_date)
+    end_dt = _date_from_input(end_date)
+
     logs = []
     for row in results:
+        row_date = _parse_storage_date(row[4])
+        if start_dt and row_date and row_date < start_dt:
+            continue
+        if end_dt and row_date and row_date > end_dt:
+            continue
+
+        status = row[8]
+        if sync_mode == "checkin" and status != "CHECKED_IN":
+            continue
+        if sync_mode == "checkout" and status != "CHECKED_OUT":
+            continue
+
         logs.append(
             {
                 "emp_code": row[2],
@@ -1228,7 +1432,11 @@ def get_daily_attendance_logs():
                 "checkin_time": row[5],   # ✅ separate field
             }
         )
-    print(f"[DEBUG] Retrieved {len(logs)} records from daily_attendance_logs")
+    print(
+        "[DEBUG] Retrieved "
+        f"{len(logs)} records from daily_attendance_logs (mode={sync_mode}, "
+        f"start={start_date}, end={end_date})"
+    )
     return logs
 
 
@@ -1518,7 +1726,7 @@ def mark_record_as_synced(emp_code: str, checkin_date: str, checkin_time: str):
         conn.close()
 
 
-def sync_data_to_server():
+def sync_data_to_server(sync_mode=None, start_date=None, end_date=None):
     """Sync daily_attendance_logs data to the server one by one"""
     if not is_internet_available():
         print("[INFO] No internet connection available. Sync skipped.")
@@ -1532,7 +1740,10 @@ def sync_data_to_server():
         print("[ERROR] No session token found in the database.")
         return {"success": False, "message": "No session token found in the database."}
 
-    logs = get_daily_attendance_logs()
+    if sync_mode is None:
+        sync_mode = get_setting("sync_mode", DEFAULT_APP_SETTINGS["sync_mode"])
+    sync_mode = (sync_mode or "both").lower()
+    logs = get_daily_attendance_logs(sync_mode=sync_mode, start_date=start_date, end_date=end_date)
     if not logs:
         print("[INFO] No data in daily_attendance_logs to sync.")
         return {"success": True, "message": "No data in daily_attendance_logs to sync."}
@@ -1549,6 +1760,7 @@ def sync_data_to_server():
         result = sync_single_record(log, token)
         if result["success"]:
             sync_results["records_synced"] += 1
+            clear_failed_sync(log["emp_code"], log["checkin_date"], log["checkin_time"])
         else:
             sync_results["success"] = False
             sync_results["records_failed"] += 1
@@ -1560,17 +1772,59 @@ def sync_data_to_server():
                     "attempts": result["attempts"],
                 }
             )
+            record_sync_failure(log, result.get("message", "Sync failed"), result.get("attempts", 1))
 
     sync_results["message"] = (
         f"Synced {sync_results['records_synced']} records, "
-        f"failed {sync_results['records_failed']} records"
+        f"failed {sync_results['records_failed']} records "
+        f"(mode={sync_mode}, range={start_date or '---'} to {end_date or '---'})"
     )
     update_last_sync_count(sync_results["records_synced"], sync_results["records_failed"])
     print(f"[INFO] Sync completed: {sync_results['message']}")
     return sync_results
 
 
-def start_background_sync():
+def retry_failed_sync(record_ids=None):
+    """Retry failed queue entries"""
+    records = get_failed_sync_records()
+    if record_ids:
+        id_set = set(record_ids)
+        records = [rec for rec in records if rec["id"] in id_set]
+    if not records:
+        return {"success": True, "message": "No failed records to retry.", "retried": 0, "resolved": 0}
+
+    token = get_session_token()
+    if not token:
+        return {"success": False, "message": "No session token found in the database.", "retried": 0, "resolved": 0}
+
+    resolved = 0
+    retried = 0
+    for rec in records:
+        payload = {}
+        if rec["payload"]:
+            try:
+                payload = json.loads(rec["payload"])
+            except Exception:
+                payload = {}
+        if not payload:
+            payload = {
+                "emp_code": rec["emp_code"],
+                "checkin_date": rec["checkin_date"],
+                "checkin_time": rec["checkin_time"],
+            }
+        result = sync_single_record(payload, token)
+        retried += 1
+        if result["success"]:
+            resolved += 1
+            clear_failed_sync(rec["emp_code"], rec["checkin_date"], rec["checkin_time"])
+        else:
+            record_sync_failure(payload, result.get("message", "Retry failed"), rec["attempts"] + 1)
+
+    message = f"Retried {retried} records, resolved {resolved}"
+    return {"success": resolved == retried, "message": message, "retried": retried, "resolved": resolved}
+
+
+def start_background_sync(sync_mode=None, start_date=None, end_date=None):
     """Start the sync process in a background thread"""
     global IS_SYNCING
     with SYNC_LOCK:
@@ -1584,7 +1838,11 @@ def start_background_sync():
     def sync_thread():
         global IS_SYNCING
         try:
-            result = sync_data_to_server()
+            result = sync_data_to_server(
+                sync_mode=sync_mode,
+                start_date=start_date,
+                end_date=end_date,
+            )
             print(f"[INFO] Background sync completed: {result['message']}")
         except Exception as e:
             print(f"[ERROR] Background sync failed: {e}")

@@ -1,11 +1,11 @@
 ; =========================
-; FixHR Face Attendance Installer
+; FixHR Face Attendance Installer (x64)
 ; =========================
 
 #define MyAppName "FixHR Face Attendance"
 #define MyAppVersion "1.0"
 #define MyAppPublisher "Fixingdots"
-#define MyAppExeName "FixHr Face Attendance.exe"
+#define MyAppExeName "FixHR_FaceAttendance_x64.exe"
 
 [Setup]
 AppId={{C3262458-44AA-4C6C-AC93-8A23DB68B86F}}
@@ -18,10 +18,13 @@ ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 ChangesAssociations=no
 DisableProgramGroupPage=no
-OutputBaseFilename=FixHR_Installer
+OutputBaseFilename=FixHR_FaceAttendance_Installer_x64
 SolidCompression=yes
 WizardStyle=modern
-SetupIconFile=D:\Ml_Projects\Offline-Face-Recognition\fix_hr_prod_logo.ico
+; Use installer icon only if the file exists to avoid compile aborts
+#ifexist "fix_hr_prod_logo.ico"
+SetupIconFile=fix_hr_prod_logo.ico
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -29,11 +32,29 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+[Dirs]
+Name: "{app}\data"
+Name: "{app}\data\profile_images"
+
 [Files]
-Source: "D:\Ml_Projects\Offline-Face-Recognition\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "D:\Ml_Projects\Offline-Face-Recognition\dist\employees.db"; DestDir: "{app}"; Flags: ignoreversion
-Source: "D:\Ml_Projects\Offline-Face-Recognition\dist\profile_images\*"; DestDir: "{app}\profile_images"; Flags: recursesubdirs createallsubdirs
-Source: "D:\Ml_Projects\Offline-Face-Recognition\fix_hr_prod_logo.ico"; DestDir: "{app}"; Flags: ignoreversion
+; App executable built by PyInstaller (one-directory build)
+Source: "dist\FixHR_FaceAttendance_x64\FixHR_FaceAttendance_x64.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
+Source: "dist\FixHR_FaceAttendance_x64\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+; Static assets required at runtime
+Source: "background-img.jpg"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "fix_hr_prod_logo.png"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "liveness_model.tflite"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+
+; Optional runtime data (ship if present)
+Source: "dist\FixHR_FaceAttendance_x64\employees.db"; DestDir: "{app}\data"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "dist\FixHR_FaceAttendance_x64\face_index.faiss"; DestDir: "{app}\data"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "dist\FixHR_FaceAttendance_x64\face_codes.txt"; DestDir: "{app}\data"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "dist\FixHR_FaceAttendance_x64\face_index.sig"; DestDir: "{app}\data"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "dist\FixHR_FaceAttendance_x64\profile_images\*"; DestDir: "{app}\data\profile_images"; Flags: recursesubdirs createallsubdirs skipifsourcedoesntexist
+
+; Copy app icon for shortcuts if present
+Source: "fix_hr_prod_logo.ico"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\fix_hr_prod_logo.ico"

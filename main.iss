@@ -1,11 +1,11 @@
 ; =========================
-; FixHR Face Attendance Installer
+; FixHR Face Attendance Installer (x64)
 ; =========================
 
 #define MyAppName "FixHR Face Attendance"
 #define MyAppVersion "1.0"
 #define MyAppPublisher "Fixingdots"
-#define MyAppExeName "FixHr Face Attendance.exe"
+#define MyAppExeName "FixHR_FaceAttendance_x64.exe"
 
 [Setup]
 AppId={{C3262458-44AA-4C6C-AC93-8A23DB68B86F}}
@@ -18,7 +18,7 @@ ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 ChangesAssociations=no
 DisableProgramGroupPage=no
-OutputBaseFilename=FixHR_Installer
+OutputBaseFilename=FixHR_FaceAttendance_Installer_x64
 SolidCompression=yes
 WizardStyle=modern
 ; Use installer icon only if the file exists to avoid compile aborts
@@ -37,8 +37,8 @@ Name: "{app}\data"
 Name: "{app}\data\profile_images"
 
 [Files]
-; App executable built by PyInstaller
-Source: "dist\main.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
+; App executable built by PyInstaller (one-file build)
+Source: "dist\FixHR_FaceAttendance_x64.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
 
 ; Static assets required at runtime
 Source: "background-img.jpg"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
