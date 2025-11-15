@@ -65,6 +65,7 @@ def login_fixhr(email, password, notification_key="123456"):
             "data": session,
         }
 
+    # url = "https://fixhr.app/api/auth/login"
     url = "https://dev.fixhr.app/api/auth/login"
     # url = "http://127.0.0.1:8000/api/auth/login"
     payload = {

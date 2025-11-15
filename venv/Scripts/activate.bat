@@ -8,7 +8,7 @@ if defined _OLD_CODEPAGE (
     "%SystemRoot%\System32\chcp.com" 65001 > nul
 )
 
-set VIRTUAL_ENV=C:\Users\suppo\Downloads\pyqt_face_recognition_app (1)\venv
+set VIRTUAL_ENV=D:\Ml_Projects\Offline-Face-Recognition\venv
 
 if not defined PROMPT set PROMPT=$P$G
 
