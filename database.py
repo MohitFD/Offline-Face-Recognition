@@ -1994,8 +1994,8 @@ def ensure_daily_log_synced(emp_code, checkin_date, checkin_time):
 
 def sync_single_record(log, token):
     """Attempt to sync a single record with retries. Handles records from both attendance_sync_logs and daily_attendance_logs."""
-    url = "https://dev.fixhr.app/api/offline-attendance/syncOfflineAttendance"
-    # url = "https://fixhr.app/api/offline-attendance/syncOfflineAttendance"
+    # url = "https://dev.fixhr.app/api/offline-attendance/syncOfflineAttendance"
+    url = "https://fixhr.app/api/offline-attendance/syncOfflineAttendance"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     
     # Ensure time is in 24-hour format for sync payload
