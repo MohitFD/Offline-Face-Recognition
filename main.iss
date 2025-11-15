@@ -38,7 +38,7 @@ Name: "{app}\data\profile_images"
 
 [Files]
 ; App executable built by PyInstaller (one-file build)
-Source: "dist\FixHR_FaceAttendance_x64.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
+Source: "dist\FixHR_FaceAttendance_x64\FixHR_FaceAttendance_x64.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
 
 ; Static assets required at runtime
 Source: "background-img.jpg"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist

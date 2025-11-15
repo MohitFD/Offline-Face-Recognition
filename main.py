@@ -2273,8 +2273,8 @@ from database import (
     get_sync_settings,
     set_setting,
     get_setting,
-    sync_data_to_server,
     get_failed_sync_records,
+    sync_data_to_server,
     retry_failed_sync,
 )
 from device_info import get_device_info, is_internet_available
@@ -2368,6 +2368,27 @@ class ManualSyncThread(QThread):
             )
         except Exception as exc:
             result = {"success": False, "message": str(exc)}
+        self.finished.emit(result)
+
+
+class BackgroundSyncThread(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, sync_mode=None, start_date=None, end_date=None):
+        super().__init__()
+        self.sync_mode = sync_mode
+        self.start_date = start_date
+        self.end_date = end_date
+
+    def run(self):
+        try:
+            result = sync_data_to_server(
+                sync_mode=self.sync_mode,
+                start_date=self.start_date,
+                end_date=self.end_date,
+            )
+        except Exception as exc:
+            result = {"success": False, "message": str(exc), "records_synced": 0, "records_failed": 0}
         self.finished.emit(result)
 
 
@@ -2645,6 +2666,28 @@ class SettingsDialog(QDialog):
         self.failed_queue_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
         self.failed_queue_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.failed_queue_table.setSelectionMode(QTableWidget.MultiSelection)
+        
+        # Fix text color for headers and data
+        self.failed_queue_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #ffffff;
+                color: #212121;
+                gridline-color: #e0e0e0;
+                font-size: 11px;
+            }
+            QTableWidget::item {
+                color: #212121;
+                padding: 4px;
+            }
+            QHeaderView::section {
+                background-color: #f5f5f5;
+                color: #212121;
+                font-weight: bold;
+                padding: 6px;
+                border: 1px solid #e0e0e0;
+            }
+        """)
+        
         layout.addWidget(self.failed_queue_table)
 
         btn_row = QHBoxLayout()
@@ -2720,10 +2763,24 @@ class SettingsDialog(QDialog):
         self.date_range_sync_btn.setEnabled(True)
         self.sync_thread = None
         self.date_range_status.setText(result.get("message", "Sync finished"))
+        
+        # Show detailed sync completion popup
+        records_synced = result.get("records_synced", 0)
+        records_failed = result.get("records_failed", 0)
+        
         if result.get("success"):
-            QMessageBox.information(self, "Sync Complete", result.get("message", "Sync completed successfully."))
+            message = f"Sync Completed Successfully!\n\n"
+            message += f"✅ Records Synced: {records_synced}\n"
+            message += f"❌ Records Failed: {records_failed}\n\n"
+            message += result.get("message", "Sync completed successfully.")
+            QMessageBox.information(self, "Sync Complete", message)
         else:
-            QMessageBox.warning(self, "Sync Issue", result.get("message", "Sync failed. Please check logs."))
+            message = f"Sync Completed with Issues\n\n"
+            message += f"✅ Records Synced: {records_synced}\n"
+            message += f"❌ Records Failed: {records_failed}\n\n"
+            message += result.get("message", "Sync failed. Please check logs.")
+            QMessageBox.warning(self, "Sync Issue", message)
+        
         self.sync_completed.emit(result)
         self.load_failed_queue()
 
@@ -2745,6 +2802,7 @@ class SettingsDialog(QDialog):
                 ]
             ):
                 item = QTableWidgetItem(value)
+                item.setForeground(QColor("#212121"))  # Set text color to dark
                 if col == 5:
                     item.setToolTip(value)
                 item.setData(Qt.UserRole, rec["id"])
@@ -3302,10 +3360,44 @@ class Sidebar(QFrame):
 
     def start_sync(self):
         try:
-            start_background_sync()
-            QMessageBox.information(self, "Success", "Attendance sync started successfully")
+            # Use BackgroundSyncThread to get sync results
+            if hasattr(self, "sync_thread") and self.sync_thread and self.sync_thread.isRunning():
+                QMessageBox.information(self, "Sync Running", "Sync is already in progress. Please wait.")
+                return
+            
+            self.sync_thread = BackgroundSyncThread()
+            self.sync_thread.finished.connect(self.on_sync_finished)
+            self.sync_thread.start()
+            QMessageBox.information(self, "Sync Started", "Attendance sync started. You will be notified when it completes.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to start attendance sync: {str(e)}")
+    
+    def on_sync_finished(self, result):
+        """Handle sync completion and show popup with sync/failed counts"""
+        records_synced = result.get("records_synced", 0)
+        records_failed = result.get("records_failed", 0)
+        
+        if result.get("success"):
+            message = f"Sync Completed Successfully!\n\n"
+            message += f"✅ Records Synced: {records_synced}\n"
+            message += f"❌ Records Failed: {records_failed}\n\n"
+            message += result.get("message", "Sync completed successfully.")
+            QMessageBox.information(self, "Sync Complete", message)
+        else:
+            message = f"Sync Completed with Issues\n\n"
+            message += f"✅ Records Synced: {records_synced}\n"
+            message += f"❌ Records Failed: {records_failed}\n\n"
+            message += result.get("message", "Sync failed. Please check logs.")
+            QMessageBox.warning(self, "Sync Issue", message)
+        
+        # Refresh data and attendance table if logged in
+        if is_logged_in():
+            parent = self.parent()
+            if parent and hasattr(parent, "refresh_data"):
+                parent.refresh_data()
+            # Also directly refresh the attendance table to ensure sync status is updated
+            if parent and hasattr(parent, "load_attendance_logs"):
+                parent.load_attendance_logs()
 
     def open_settings(self):
         parent = self.parent()
@@ -3675,10 +3767,34 @@ class AttendanceApp(QWidget):
             return
         if (now.hour, now.minute) >= (target_hour, target_minute):
             print(f"[INFO] Auto sync triggered at {now.strftime('%H:%M')} with mode {self.sync_settings['sync_mode']}")
-            start_background_sync()
+            # Use BackgroundSyncThread for auto sync with completion notification
+            if not hasattr(self, "auto_sync_thread") or not self.auto_sync_thread or not self.auto_sync_thread.isRunning():
+                self.auto_sync_thread = BackgroundSyncThread(sync_mode=self.sync_settings.get("sync_mode"))
+                self.auto_sync_thread.finished.connect(self.on_auto_sync_finished)
+                self.auto_sync_thread.start()
             threading.Thread(target=retry_failed_sync, daemon=True).start()
             set_setting("auto_sync_last_run", today_str)
             self.refresh_data()
+    
+    def on_auto_sync_finished(self, result):
+        """Handle auto sync completion and show popup"""
+        records_synced = result.get("records_synced", 0)
+        records_failed = result.get("records_failed", 0)
+        
+        if result.get("success"):
+            message = f"Auto Sync Completed!\n\n"
+            message += f"✅ Records Synced: {records_synced}\n"
+            message += f"❌ Records Failed: {records_failed}\n\n"
+            message += result.get("message", "Auto sync completed successfully.")
+            QMessageBox.information(self, "Auto Sync Complete", message)
+        else:
+            message = f"Auto Sync Completed with Issues\n\n"
+            message += f"✅ Records Synced: {records_synced}\n"
+            message += f"❌ Records Failed: {records_failed}\n\n"
+            message += result.get("message", "Auto sync failed. Please check logs.")
+            QMessageBox.warning(self, "Auto Sync Issue", message)
+        
+        self.refresh_data()
 
     def open_settings_dialog(self):
         if not is_logged_in():
@@ -3998,14 +4114,14 @@ class AttendanceApp(QWidget):
         if hasattr(self, 'guest_date_label') and hasattr(self, 'guest_time_label'):
             now = datetime.datetime.now()
             self.guest_date_label.setText(f"Date: {now.strftime('%d-%m-%Y')}")
-            self.guest_time_label.setText(f"{now.strftime('%I:%M:%S %p')}")
+            self.guest_time_label.setText(f"{now.strftime('%H:%M:%S')}")
 
     def update_time(self):
         """Enhanced update_time method to handle both admin and guest views"""
         now = datetime.datetime.now()
         
         if hasattr(self, 'time_label') and hasattr(self, 'date_label'):
-            self.time_label.setText(now.strftime("%I:%M:%S"))
+            self.time_label.setText(now.strftime("%H:%M:%S"))
             self.date_label.setText(f"Date: {now.strftime('%d-%m-%y')}")
         
         if hasattr(self, 'guest_date_label') and hasattr(self, 'guest_time_label'):
@@ -4192,6 +4308,9 @@ class AttendanceApp(QWidget):
             pending = self.get_pending_sync_count()
             failed = len(get_failed_sync_records())
             self.alert_msg.setText(f"{pending} pending sync | {failed} failed")
+            # Refresh the attendance table to show updated sync status
+            if hasattr(self, 'load_attendance_logs'):
+                self.load_attendance_logs()
         except Exception as e:
             print(f"Error refreshing cards: {e}")
 

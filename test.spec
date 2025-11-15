@@ -68,6 +68,11 @@ hidden_imports = [
     'io',
     'sys',
     'os',
+    'scipy',
+    'scipy.ndimage',
+    'scipy.spatial',
+    'matplotlib',
+    'matplotlib.pyplot',
 ]
 
 a = Analysis(
@@ -87,7 +92,7 @@ a = Analysis(
     hookspath=['.'],  # Include custom hooks
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['matplotlib', 'scipy', 'pandas', 'IPython', 'jupyter'],
+    excludes=['pandas', 'IPython', 'jupyter'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -102,7 +107,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='FixHR_FaceAttendance_x64',
-    debug=False,
+    debug=True,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,  # Disable UPX to avoid DLL issues
