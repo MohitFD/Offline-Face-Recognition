@@ -370,7 +370,13 @@ def detect_and_predict(img):
             "emp_full_name": "Error",
             "face_image": None,
             "status_icon": "❌",
+            "bbox": None,
+            "frame_size": (640, 480),
         }
+
+    frame_size = (img.shape[1], img.shape[0])
+    bbox = None
+    face_img = None
 
     # Step 1: Face Detection
     print("[INFO] Step 1: Detecting faces...")
@@ -384,6 +390,8 @@ def detect_and_predict(img):
             "emp_full_name": "No Face",
             "face_image": None,
             "status_icon": "👤",
+            "bbox": None,
+            "frame_size": frame_size,
         }
 
     # Process the first (most confident) detection
@@ -405,6 +413,8 @@ def detect_and_predict(img):
             "emp_full_name": "Extraction Error",
             "face_image": None,
             "status_icon": "❌",
+            "bbox": None,
+            "frame_size": frame_size,
         }
 
     # Step 3: Liveness Detection (if available)
@@ -421,6 +431,8 @@ def detect_and_predict(img):
                 "status_icon": "🚫",
                 "liveness_check": False,
                 "liveness_available": True,
+                "bbox": bbox,
+                "frame_size": frame_size,
             }
         else:
             print("[INFO] ✅ Liveness check PASSED - Real human detected")
@@ -486,6 +498,7 @@ def detect_and_predict(img):
                 "liveness_available": liveness_model_available,
                 "face_confidence": confidence,
                 "bbox": bbox,
+                "frame_size": frame_size,
             }
 
             return enhanced_result
@@ -507,6 +520,7 @@ def detect_and_predict(img):
                 "liveness_available": liveness_model_available,
                 "face_confidence": confidence,
                 "bbox": bbox,
+                "frame_size": frame_size,
             }
 
     except ImportError as e:
@@ -517,6 +531,8 @@ def detect_and_predict(img):
             "emp_full_name": "Module Error",
             "face_image": face_img,
             "status_icon": "❌",
+            "bbox": bbox,
+            "frame_size": frame_size,
         }
 
     except Exception as e:
@@ -527,6 +543,8 @@ def detect_and_predict(img):
             "emp_full_name": "System Error",
             "face_image": face_img,
             "status_icon": "❌",
+            "bbox": bbox,
+            "frame_size": frame_size,
         }
 
     finally:

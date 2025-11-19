@@ -12,10 +12,38 @@ def save_session(data):
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT OR REPLACE INTO sessions (token, employee_id, name, email, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO sessions (
+            token,
+            employee_id,
+            name,
+            email,
+            business_id,
+            business_name,
+            branch_id,
+            user_id,
+            phone,
+            emp_code,
+            role_name,
+            role_id,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (data["token"], data["employee_id"], data["name"], data["email"], datetime.utcnow())
+        (
+            data["token"],
+            data["employee_id"],
+            data["name"],
+            data["email"],
+            data.get("business_id"),
+            data.get("business_name"),
+            data.get("branch_id"),
+            data.get("user_id"),
+            data.get("phone"),
+            data.get("emp_code"),
+            data.get("role_name"),
+            data.get("role_id"),
+            datetime.utcnow(),
+        )
     )
     conn.commit()
     conn.close()
@@ -26,7 +54,21 @@ def load_session():
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT token, employee_id, name, email FROM sessions LIMIT 1
+        SELECT
+            token,
+            employee_id,
+            name,
+            email,
+            business_id,
+            business_name,
+            branch_id,
+            user_id,
+            phone,
+            emp_code,
+            role_name,
+            role_id
+        FROM sessions
+        LIMIT 1
         """
     )
     row = cursor.fetchone()
@@ -36,7 +78,15 @@ def load_session():
             "token": row[0],
             "employee_id": row[1],
             "name": row[2],
-            "email": row[3]
+            "email": row[3],
+            "business_id": row[4],
+            "business_name": row[5],
+            "branch_id": row[6],
+            "user_id": row[7],
+            "phone": row[8],
+            "emp_code": row[9],
+            "role_name": row[10],
+            "role_id": row[11],
         }
     return None
 
@@ -65,8 +115,8 @@ def login_fixhr(email, password, notification_key="123456"):
             "data": session,
         }
 
-    # url = "https://fixhr.app/api/auth/login"
-    url = "https://dev.fixhr.app/api/auth/login"
+    url = "https://fixhr.app/api/auth/login"
+    # url = "https://dev.fixhr.app/api/auth/login"
     # url = "http://127.0.0.1:8000/api/auth/login"
     payload = {
         "email": email,
@@ -80,14 +130,24 @@ def login_fixhr(email, password, notification_key="123456"):
         print("🔐 Login response status:", response.status_code)
 
         data = response.json()
+        print("🔐 Login data:", data)
         if response.status_code == 200 and data.get("success"):
             user = data["data"]["user"]
             token = data["data"]["token"]
+            role = user.get("role") or {}
             session_data = {
                 "token": token,
                 "employee_id": user.get("emp_id"),
                 "name": user.get("name", "User"),
                 "email": user.get("email"),
+                "business_id": user.get("business_id"),
+                "business_name": user.get("business_name") or user.get("company_name") or user.get("name"),
+                "branch_id": user.get("branch_id"),
+                "user_id": user.get("user_id"),
+                "phone": user.get("phone"),
+                "emp_code": user.get("emp_code"),
+                "role_name": role.get("role_name"),
+                "role_id": role.get("role_id"),
             }
             save_session(session_data)
             return {"status": "success", "data": session_data}

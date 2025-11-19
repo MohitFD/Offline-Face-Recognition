@@ -2,6 +2,17 @@ import cv2
 import platform
 import psutil
 import socket
+import uuid
+
+
+def _get_mac_address():
+    try:
+        mac_int = uuid.getnode()
+        mac_hex = f"{mac_int:012x}"
+        mac = ":".join(mac_hex[i : i + 2] for i in range(0, 12, 2))
+        return mac.upper()
+    except Exception:
+        return "00:00:00:00:00:00"
 
 
 def is_internet_available(timeout: float = 2.0) -> bool:
@@ -50,4 +61,5 @@ def get_device_info():
         "connectivity": connectivity,
         "status": status,  # camera status (kept for backward-compat)
         "internet_status": "Online" if is_internet_available() else "Offline",
+        "mac_address": _get_mac_address(),
     }

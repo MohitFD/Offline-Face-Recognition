@@ -9,6 +9,8 @@ import time
 import shutil
 import pytz
 import json
+import platform
+import uuid
 
 
 
@@ -65,6 +67,9 @@ DEFAULT_APP_SETTINGS = {
     "auto_sync_time": "09:00",
     "sync_mode": "both",
     "auto_sync_last_run": "",
+    "face_marking_enabled": "0",
+    "blink_detection_enabled": "0",
+    "blink_detection_count": "1",
 }
 
 
@@ -147,6 +152,35 @@ def normalize_time(time_input):
     """
     if time_input is None:
         return get_current_time_str()
+
+
+# ---------------------- Device Identity Helpers ----------------------
+def get_system_mac_address():
+    """Return system MAC address in colon-separated format."""
+    try:
+        mac_int = uuid.getnode()
+        mac_hex = f"{mac_int:012x}"
+        mac = ":".join(mac_hex[i : i + 2] for i in range(0, 12, 2))
+        return mac.upper()
+    except Exception as exc:
+        print(f"[WARNING] Unable to determine MAC address: {exc}")
+        return "00:00:00:00:00:00"
+
+
+def get_device_name():
+    """Return a stable device/host name."""
+    try:
+        return platform.node() or socket.gethostname() or "Unknown-Device"
+    except Exception:
+        return "Unknown-Device"
+
+
+def get_sync_device_metadata():
+    """Collect device metadata that should accompany every sync payload."""
+    return {
+        "device_name": get_device_name(),
+        "system_mac_address": get_system_mac_address(),
+    }
 
     if isinstance(time_input, str):
         # First try 24-hour format (HH:MM:SS) - this is the standard format we use
@@ -309,11 +343,37 @@ def init_db():
             employee_id TEXT NOT NULL,
             name TEXT NOT NULL,
             email TEXT NOT NULL,
+            business_id TEXT,
+            business_name TEXT,
+            branch_id TEXT,
+            user_id TEXT,
+            phone TEXT,
+            emp_code TEXT,
+            role_name TEXT,
+            role_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+    try:
+        cursor.execute("PRAGMA table_info(sessions)")
+        session_cols = [row[1].lower() for row in cursor.fetchall()]
+        column_defaults = {
+            "business_id": "TEXT",
+            "business_name": "TEXT",
+            "branch_id": "TEXT",
+            "user_id": "TEXT",
+            "phone": "TEXT",
+            "emp_code": "TEXT",
+            "role_name": "TEXT",
+            "role_id": "TEXT",
+        }
+        for col, col_type in column_defaults.items():
+            if col not in session_cols:
+                cursor.execute(f"ALTER TABLE sessions ADD COLUMN {col} {col_type}")
+    except Exception:
+        pass
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS sync_metadata (
@@ -1212,6 +1272,29 @@ def get_sync_settings():
     }
 
 
+def get_detection_settings():
+    """Return detection related feature flags"""
+    def _to_bool(value, default_key):
+        if value is None:
+            value = DEFAULT_APP_SETTINGS[default_key]
+        return str(value) == "1"
+
+    face_marking = get_setting("face_marking_enabled", DEFAULT_APP_SETTINGS["face_marking_enabled"])
+    blink_enabled = get_setting("blink_detection_enabled", DEFAULT_APP_SETTINGS["blink_detection_enabled"])
+    blink_count = get_setting("blink_detection_count", DEFAULT_APP_SETTINGS["blink_detection_count"])
+
+    try:
+        blink_count_value = max(1, int(blink_count))
+    except (TypeError, ValueError):
+        blink_count_value = 1
+
+    return {
+        "face_marking_enabled": _to_bool(face_marking, "face_marking_enabled"),
+        "blink_detection_enabled": _to_bool(blink_enabled, "blink_detection_enabled"),
+        "blink_detection_count": blink_count_value,
+    }
+
+
 def record_sync_failure(log, error_message, attempts=1):
     """Store or update failed sync payload"""
     conn = sqlite3.connect(DB_PATH, timeout=10)
@@ -1992,12 +2075,16 @@ def ensure_daily_log_synced(emp_code, checkin_date, checkin_time):
 #         conn.close()
 
 
-def sync_single_record(log, token):
+def sync_single_record(log, token, device_meta=None):
     """Attempt to sync a single record with retries. Handles records from both attendance_sync_logs and daily_attendance_logs."""
     # url = "https://dev.fixhr.app/api/offline-attendance/syncOfflineAttendance"
     url = "https://fixhr.app/api/offline-attendance/syncOfflineAttendance"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     
+    device_meta = device_meta or {}
+    device_name = device_meta.get("device_name", get_device_name())
+    system_mac = device_meta.get("system_mac_address", get_system_mac_address())
+
     # Ensure time is in 24-hour format for sync payload
     checkin_time_24h = normalize_time(log.get("checkin_time", ""))
     checkout_time_24h = None
@@ -2015,6 +2102,11 @@ def sync_single_record(log, token):
     payload["check_in_time"] = f"{log['checkin_date']} {checkin_time_24h}"  # 24-hour format
     if checkout_time_24h:
         payload["check_out_time"] = f"{log.get('checkout_date', log['checkin_date'])} {checkout_time_24h}"  # 24-hour format
+
+    # Attach device + sync metadata
+    payload["device_name"] = device_name
+    payload["system_mac_address"] = system_mac
+    payload["sync_date"] = get_current_datetime_str()
     
     print(f"[DEBUG] Syncing record for emp_code={log['emp_code']} on {log['checkin_date']} {checkin_time_24h} with payload: {payload}")
 
@@ -2333,6 +2425,8 @@ def sync_data_to_server(sync_mode=None, start_date=None, end_date=None):
         print("[INFO] No unsynced data in attendance_sync_logs to sync.")
         return {"success": True, "message": "No unsynced data in attendance_sync_logs to sync."}
 
+    device_metadata = get_sync_device_metadata()
+
     sync_results = {
         "success": True,
         "message": "",
@@ -2342,7 +2436,7 @@ def sync_data_to_server(sync_mode=None, start_date=None, end_date=None):
     }
 
     for log in logs:
-        result = sync_single_record(log, token)
+        result = sync_single_record(log, token, device_metadata)
         if result["success"]:
             # Only count as newly synced if it was actually synced (not already synced)
             if result.get("is_newly_synced", True):  # Default to True for backward compatibility
@@ -2395,6 +2489,8 @@ def retry_failed_sync(record_ids=None):
 
     resolved = 0
     retried = 0
+    device_metadata = get_sync_device_metadata()
+
     for rec in records:
         payload = {}
         if rec["payload"]:
@@ -2408,7 +2504,7 @@ def retry_failed_sync(record_ids=None):
                 "checkin_date": rec["checkin_date"],
                 "checkin_time": rec["checkin_time"],
             }
-        result = sync_single_record(payload, token)
+        result = sync_single_record(payload, token, device_metadata)
         retried += 1
         if result["success"]:
             resolved += 1
@@ -2418,6 +2514,30 @@ def retry_failed_sync(record_ids=None):
 
     message = f"Retried {retried} records, resolved {resolved}"
     return {"success": resolved == retried, "message": message, "retried": retried, "resolved": resolved}
+
+
+def register_device_on_server(token, payload):
+    """Register device metadata with FixHR server."""
+    if not token:
+        return {"success": False, "message": "Authentication token missing."}
+    url = "https://fixhr.app/api/offline-attendance/register-device"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        try:
+            data = response.json()
+        except ValueError:
+            data = {}
+        success = response.status_code in (200, 201) and data.get("success", True) not in (False, "false", 0, "0")
+        message = data.get("message") or ("Device registered successfully." if success else response.text)
+        if success:
+            return {"success": True, "message": message}
+        return {
+            "success": False,
+            "message": message or f"Device registration failed with status {response.status_code}",
+        }
+    except requests.exceptions.RequestException as exc:
+        return {"success": False, "message": f"Failed to register device: {exc}"}
 
 
 def start_background_sync(sync_mode=None, start_date=None, end_date=None):

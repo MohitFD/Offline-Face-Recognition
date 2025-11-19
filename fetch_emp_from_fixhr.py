@@ -694,8 +694,8 @@ from database import (
 
 
 def fetch_and_store_employees(token):
-    # url = "https://fixhr.app/api/admin/employee/get-employees-list"
-    url = "https://dev.fixhr.app/api/admin/employee/get-employees-list"
+    url = "https://fixhr.app/api/admin/employee/get-employees-list"
+    # url = "https://dev.fixhr.app/api/admin/employee/get-employees-list"
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
