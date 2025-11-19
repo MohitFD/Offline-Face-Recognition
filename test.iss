@@ -18,12 +18,18 @@ ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 ChangesAssociations=no
 DisableProgramGroupPage=no
+DisableFinishedPage=no
 OutputBaseFilename=FixHR_FaceAttendance_Installer_x64
 SolidCompression=yes
 WizardStyle=modern
-; Use installer icon only if the file exists to avoid compile aborts
+; Installer icon - requires .ico format
+; Convert fix_hr_prod_logo.png to .ico using: 
+; Online: https://convertio.co/png-ico/ or https://www.icoconverter.com/
+; Or ImageMagick: magick convert fix_hr_prod_logo.png -define icon:auto-resize=256,128,64,48,32,16 fix_hr_prod_logo.ico
 #ifexist "fix_hr_prod_logo.ico"
 SetupIconFile=fix_hr_prod_logo.ico
+#else
+; ICO file not found - installer will use default icon. Please create fix_hr_prod_logo.ico from PNG file.
 #endif
 
 [Languages]
@@ -57,8 +63,43 @@ Source: "dist\FixHR_FaceAttendance_x64\profile_images\*"; DestDir: "{app}\data\p
 Source: "fix_hr_prod_logo.ico"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\fix_hr_prod_logo.ico"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\fix_hr_prod_logo.ico"; Tasks: desktopicon
+; Use the executable's icon if .ico file is not available, or specify the .ico file
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+var
+  FinishedPage: TWizardPage;
+
+procedure InitializeWizard();
+begin
+  // Ensure finish page is properly initialized
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+  begin
+    // Installation completed successfully
+    // The finish page will be shown automatically
+  end;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  // Ensure the finish page is shown properly and doesn't close automatically
+  if CurPageID = wpFinished then
+  begin
+    // Finish page is displayed - user must click Finish to close
+    WizardForm.NextButton.Caption := 'Finish';
+    WizardForm.CancelButton.Visible := False;
+  end;
+end;
+
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+end;

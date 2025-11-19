@@ -2186,8 +2186,10 @@ import os
 import sys
 import cv2
 import datetime
+import math
 import importlib.metadata
 import threading
+import mediapipe as mp
 from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
@@ -2221,6 +2223,10 @@ from PyQt5.QtWidgets import (
     QButtonGroup,
     QGroupBox,
     QLCDNumber,
+    QSpinBox,
+    QComboBox,
+    QFileDialog,
+    QProgressBar,
 )
 from PyQt5.QtCore import (
     QTimer,
@@ -2271,15 +2277,18 @@ from database import (
     get_sync_status_overview,
     get_remaining_sync_count,
     get_sync_settings,
+    get_detection_settings,
     set_setting,
     get_setting,
     get_failed_sync_records,
     sync_data_to_server,
     retry_failed_sync,
+    register_device_on_server,
 )
 from device_info import get_device_info, is_internet_available
 from speak import speak
 from backup_utils import BackupManager
+import csv
 import io
 
 # sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
@@ -2406,6 +2415,22 @@ class FailedRetryThread(QThread):
             result = {"success": False, "message": str(exc)}
         self.finished.emit(result)
 
+
+class DeviceRegistrationThread(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, token, payload):
+        super().__init__()
+        self.token = token
+        self.payload = payload
+
+    def run(self):
+        try:
+            result = register_device_on_server(self.token, self.payload)
+        except Exception as exc:
+            result = {"success": False, "message": str(exc)}
+        self.finished.emit(result)
+
 class ModalLoader(QDialog):
     def __init__(self, title: str, message: str, parent=None):
         super().__init__(parent)
@@ -2454,6 +2479,7 @@ class SettingsDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(520)
         self.current_settings = get_sync_settings()
+        self.detection_settings = get_detection_settings()
         self.sync_thread = None
         self.failed_retry_thread = None
 
@@ -2510,6 +2536,9 @@ class SettingsDialog(QDialog):
 
         self.failed_group = self._build_failed_queue_group()
         main_layout.addWidget(self.failed_group)
+
+        self.detection_group = self._build_detection_group()
+        main_layout.addWidget(self.detection_group)
 
         button_row = QHBoxLayout()
         button_row.addStretch()
@@ -2707,6 +2736,46 @@ class SettingsDialog(QDialog):
         self.load_failed_queue()
         return group
 
+    def _build_detection_group(self):
+        group = QGroupBox("Detection Preferences")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(10)
+
+        self.face_marking_checkbox = QCheckBox("Enable face marking overlay")
+        self.face_marking_checkbox.setChecked(
+            self.detection_settings.get("face_marking_enabled", False)
+        )
+        layout.addWidget(self.face_marking_checkbox)
+
+        self.blink_detection_checkbox = QCheckBox("Require blink before registering attendance")
+        self.blink_detection_checkbox.setChecked(
+            self.detection_settings.get("blink_detection_enabled", False)
+        )
+        self.blink_detection_checkbox.toggled.connect(self.update_blink_controls)
+        layout.addWidget(self.blink_detection_checkbox)
+
+        blink_row = QHBoxLayout()
+        blink_label = QLabel("Blink count required")
+        blink_label.setStyleSheet("color: #9aa7b2;")
+        blink_row.addWidget(blink_label)
+
+        self.blink_count_spin = QSpinBox()
+        self.blink_count_spin.setRange(1, 5)
+        self.blink_count_spin.setValue(
+            self.detection_settings.get("blink_detection_count", 1)
+        )
+        blink_row.addWidget(self.blink_count_spin)
+        blink_row.addStretch()
+        layout.addLayout(blink_row)
+
+        hint = QLabel("Users must blink the specified number of times before detection starts.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #9aa7b2; font-size: 11px;")
+        layout.addWidget(hint)
+
+        self.update_blink_controls(self.blink_detection_checkbox.isChecked())
+        return group
+
     def update_auto_sync_ui(self, checked):
         self.schedule_frame.setVisible(bool(checked))
 
@@ -2730,10 +2799,25 @@ class SettingsDialog(QDialog):
         set_setting("sync_mode", selected_mode)
         set_setting("auto_sync_last_run", "")
 
+        set_setting(
+            "face_marking_enabled",
+            "1" if self.face_marking_checkbox.isChecked() else "0",
+        )
+        set_setting(
+            "blink_detection_enabled",
+            "1" if self.blink_detection_checkbox.isChecked() else "0",
+        )
+        set_setting("blink_detection_count", str(self.blink_count_spin.value()))
+
         updated = get_sync_settings()
         self.current_settings = updated
-        self.settings_saved.emit(updated)
+        combined_settings = {**updated, **get_detection_settings()}
+        self.settings_saved.emit(combined_settings)
         QMessageBox.information(self, "Settings Saved", "Sync preferences updated successfully.")
+
+    def update_blink_controls(self, checked):
+        if hasattr(self, "blink_count_spin"):
+            self.blink_count_spin.setEnabled(bool(checked))
 
     def handle_range_sync(self):
         if self.sync_thread and self.sync_thread.isRunning():
@@ -2839,6 +2923,230 @@ class SettingsDialog(QDialog):
         self.load_failed_queue()
         self.sync_completed.emit(result)
 
+
+class ReportsDialog(QDialog):
+    """
+    Simple reports viewer with filters for:
+      - Complete data (all records)
+      - Synced data only
+      - Unsynced data only
+      - Failed data (sync queue)
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Reports")
+        self.setMinimumSize(900, 500)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        # Filter row
+        filter_row = QHBoxLayout()
+        filter_label = QLabel("Filter:")
+        filter_label.setStyleSheet("font-weight: 600;")
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems(
+            [
+                "Complete Data",
+                "Synced Data Only",
+                "Unsynced Data Only",
+                "Failed Data",
+            ]
+        )
+        self.filter_combo.currentIndexChanged.connect(self.refresh_data)
+        filter_row.addWidget(filter_label)
+        filter_row.addWidget(self.filter_combo)
+
+        # Export button for current filter data
+        self.export_btn = QPushButton("Export")
+        self.export_btn.setToolTip("Export current report to Excel (CSV)")
+        self.export_btn.clicked.connect(self.export_current_data)
+        filter_row.addWidget(self.export_btn)
+
+        filter_row.addStretch()
+        layout.addLayout(filter_row)
+
+        # Table for records
+        self.table = QTableWidget()
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setStyleSheet(
+            """
+            QTableWidget {
+                background-color: #0f1c2e;
+                alternate-background-color: #16263a;
+                color: #e8edf2;
+                gridline-color: #1f3b59;
+                border: 1px solid #1f3b59;
+                font-size: 11px;
+            }
+            QHeaderView::section {
+                background-color: #001F3F;
+                color: #e8edf2;
+                font-weight: 600;
+                padding: 6px;
+                border: none;
+            }
+            QTableWidget::item:selected {
+                background-color: #264b7a;
+                color: #ffffff;
+            }
+            """
+        )
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+        # Close button
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        # Initial load
+        self.refresh_data()
+
+    def _load_attendance_records(self):
+        """Load all attendance logs from database."""
+        return get_attendance_logs()
+
+    def _load_failed_records(self):
+        """Load failed sync records from database."""
+        return get_failed_sync_records()
+
+    def refresh_data(self):
+        mode = self.filter_combo.currentText()
+
+        if mode == "Failed Data":
+            # Show failed sync queue
+            records = self._load_failed_records()
+            self.table.setColumnCount(6)
+            self.table.setHorizontalHeaderLabels(
+                ["Emp Code", "Date", "Time", "Attempts", "Last Attempt", "Error"]
+            )
+            self.table.clearContents()
+            self.table.setRowCount(0)
+            for row_idx, rec in enumerate(records):
+                self.table.insertRow(row_idx)
+                row_values = [
+                    str(rec.get("emp_code", "")),
+                    rec.get("checkin_date", ""),
+                    rec.get("checkin_time", ""),
+                    str(rec.get("attempts", "")),
+                    rec.get("last_attempt_at", "") or "-",
+                    rec.get("error_message", "") or "-",
+                ]
+                for col, value in enumerate(row_values):
+                    item = QTableWidgetItem(value)
+                    self.table.setItem(row_idx, col, item)
+        else:
+            # Attendance records with sync flag
+            all_logs = self._load_attendance_records()
+            if mode == "Synced Data Only":
+                logs = [log for log in all_logs if log.get("sync", 0) == 1]
+            elif mode == "Unsynced Data Only":
+                logs = [log for log in all_logs if log.get("sync", 0) == 0]
+            else:  # Complete Data
+                logs = all_logs
+
+            self.table.setColumnCount(8)
+            self.table.setHorizontalHeaderLabels(
+                [
+                    "Date",
+                    "Emp Code",
+                    "Name",
+                    "Check-in",
+                    "Check-out",
+                    "Status",
+                    "Mode",
+                    "Sync",
+                ]
+            )
+            self.table.clearContents()
+            self.table.setRowCount(0)
+            for row_idx, log in enumerate(logs):
+                self.table.insertRow(row_idx)
+                row_values = [
+                    format_date_ddmmyy(log.get("checkin_date", "")),
+                    str(log.get("emp_code", "")),
+                    log.get("emp_full_name", ""),
+                    log.get("checkin_time", ""),
+                    log.get("checkout_time", "") or "-",
+                    log.get("status", "") or "Pending",
+                    log.get("mode", "Offline-Face"),
+                    "Synced" if log.get("sync", 0) == 1 else "Not Synced",
+                ]
+                for col, value in enumerate(row_values):
+                    item = QTableWidgetItem(value)
+                    if col == 5:
+                        if value == "CHECKED_IN":
+                            item = QTableWidgetItem("MSP")
+                            item.setForeground(QColor("orange"))
+                        elif value == "CHECKED_OUT":
+                            item = QTableWidgetItem("Present")
+                            item.setForeground(QColor("green"))
+                        else:
+                            item.setForeground(QColor("blue"))
+                    self.table.setItem(row_idx, col, item)
+
+    def export_current_data(self):
+        """Export the currently visible table data to a CSV file (Excel compatible)."""
+        row_count = self.table.rowCount()
+        col_count = self.table.columnCount()
+        if row_count == 0 or col_count == 0:
+            QMessageBox.information(self, "No Data", "There is no data to export for this filter.")
+            return
+
+        # Default filename suggestion based on filter
+        filter_name = self.filter_combo.currentText().replace(" ", "_").lower()
+        default_name = f"reports_{filter_name}.csv"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Report",
+            default_name,
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, mode="w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+
+                # Header row
+                headers = []
+                for col in range(col_count):
+                    header_item = self.table.horizontalHeaderItem(col)
+                    headers.append(header_item.text() if header_item else f"Column {col+1}")
+                writer.writerow(headers)
+
+                # Data rows
+                for row in range(row_count):
+                    row_data = []
+                    for col in range(col_count):
+                        item = self.table.item(row, col)
+                        row_data.append(item.text() if item else "")
+                    writer.writerow(row_data)
+
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                f"Report exported successfully to:\n{path}\n\nYou can open this file in Excel.",
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                f"Could not export report:\n{exc}",
+            )
+
 class DetectWorker(QThread):
     result_ready = pyqtSignal(dict)
 
@@ -2857,6 +3165,104 @@ class DetectWorker(QThread):
                 "message": str(e),
             }
         self.result_ready.emit(result)
+
+
+class BlinkTracker:
+    """Lightweight blink detector powered by MediaPipe Face Mesh"""
+
+    LEFT_EYE_IDXS = [33, 160, 158, 133, 153, 144]
+    RIGHT_EYE_IDXS = [362, 385, 387, 263, 373, 380]
+
+    def __init__(self):
+        self.available = False
+        self.face_mesh = None
+        self.threshold = 0.22
+        self.min_closed_frames = 2
+        self.closed_frames = 0
+        self.cooldown_frames = 0
+        self.cooldown_length = 3
+
+        try:
+            self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+                max_num_faces=1,
+                refine_landmarks=True,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5,
+            )
+            self.available = True
+        except Exception as exc:
+            print(f"[WARN] Blink tracker unavailable: {exc}")
+            self.face_mesh = None
+
+    @staticmethod
+    def _landmark_points(landmarks, indexes, width, height):
+        return [
+            (
+                landmarks[idx].x * width,
+                landmarks[idx].y * height,
+            )
+            for idx in indexes
+        ]
+
+    @staticmethod
+    def _eye_aspect_ratio(points):
+        if len(points) < 6:
+            return 0.0
+        p1, p2, p3, p4, p5, p6 = points
+        vertical = math.dist(p2, p6) + math.dist(p3, p5)
+        horizontal = 2.0 * math.dist(p1, p4)
+        if horizontal == 0:
+            return 0.0
+        return vertical / horizontal
+
+    def process(self, frame):
+        if not self.available or frame is None or frame.size == 0:
+            return False
+
+        if self.cooldown_frames > 0:
+            self.cooldown_frames -= 1
+
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self.face_mesh.process(rgb)
+        except Exception as exc:
+            print(f"[WARN] Blink processing failed: {exc}")
+            return False
+
+        if not results.multi_face_landmarks:
+            self.closed_frames = 0
+            return False
+
+        image_height, image_width = frame.shape[:2]
+        face_landmarks = results.multi_face_landmarks[0].landmark
+        left_eye = self._landmark_points(face_landmarks, self.LEFT_EYE_IDXS, image_width, image_height)
+        right_eye = self._landmark_points(face_landmarks, self.RIGHT_EYE_IDXS, image_width, image_height)
+        ear_left = self._eye_aspect_ratio(left_eye)
+        ear_right = self._eye_aspect_ratio(right_eye)
+        ear = (ear_left + ear_right) / 2.0
+
+        if ear < self.threshold:
+            self.closed_frames += 1
+            return False
+
+        # Eyes open again
+        if self.closed_frames >= self.min_closed_frames and self.cooldown_frames == 0:
+            self.closed_frames = 0
+            self.cooldown_frames = self.cooldown_length
+            return True
+
+        self.closed_frames = 0
+        return False
+
+    def reset_cycle(self):
+        self.closed_frames = 0
+        self.cooldown_frames = 0
+
+    def release(self):
+        if self.face_mesh:
+            self.face_mesh.close()
+            self.face_mesh = None
+        self.available = False
 
 class ModernCard(QFrame):
     def __init__(self, parent=None):
@@ -3238,38 +3644,10 @@ class Sidebar(QFrame):
             self.sync_btn.clicked.connect(self.start_sync)
             icon_buttons_layout.addWidget(self.sync_btn)
 
-            # # Settings Icon Button
-            # self.settings_btn = QToolButton()
-            # self.settings_btn.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-            # self.settings_btn.setIconSize(QSize(20, 20))
-            # self.settings_btn.setToolTip("Settings")
-            # self.settings_btn.setCursor(QCursor(Qt.PointingHandCursor))
-            # self.settings_btn.setFixedSize(36, 36)
-            # self.settings_btn.setStyleSheet("""
-            #     QToolButton {
-            #         background-color: #002F5E;
-            #         color: white;
-            #         border: none;
-            #         border-radius: 6px;
-            #     }
-            #     QToolButton:hover {
-            #         background-color: #004080;
-            #     }
-            #     QToolButton:pressed {
-            #         background-color: #001F3F;
-            #     }
-            # """)
-            # add_shadow(self.settings_btn)
-            # self.settings_btn.clicked.connect(self.open_settings)
-            # icon_buttons_layout.addWidget(self.settings_btn)
-
-            # icon_buttons_layout.addStretch()
-            # layout.addLayout(icon_buttons_layout)
-
-           # Settings Icon Button
+            # Settings Icon Button
             self.settings_btn = QToolButton()
-            self.settings_btn.setText("⚙")  # Gear icon
-            self.settings_btn.setFont(QFont("Segoe UI Symbol", 18))  # Adjust size
+            self.settings_btn.setText("⚙")
+            self.settings_btn.setFont(QFont("Segoe UI Symbol", 18))
             self.settings_btn.setToolTip("Settings")
             self.settings_btn.setCursor(QCursor(Qt.PointingHandCursor))
             self.settings_btn.setFixedSize(36, 36)
@@ -3293,6 +3671,34 @@ class Sidebar(QFrame):
             add_shadow(self.settings_btn)
             self.settings_btn.clicked.connect(self.open_settings)
             icon_buttons_layout.addWidget(self.settings_btn)
+
+            # Reports Icon Button
+            self.reports_btn = QToolButton()
+            self.reports_btn.setText("📊")
+            self.reports_btn.setFont(QFont("Segoe UI Symbol", 16))
+            self.reports_btn.setToolTip("Reports")
+            self.reports_btn.setCursor(QCursor(Qt.PointingHandCursor))
+            self.reports_btn.setFixedSize(36, 36)
+            self.reports_btn.setStyleSheet("""
+                QToolButton {
+                    background-color: #002F5E;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    font-size: 18px;
+                    qproperty-iconSize: 20px; 
+                    padding: 0px;
+                }
+                QToolButton:hover {
+                    background-color: #004080;
+                }
+                QToolButton:pressed {
+                    background-color: #001F3F;
+                }
+            """)
+            add_shadow(self.reports_btn)
+            self.reports_btn.clicked.connect(self.open_reports)
+            icon_buttons_layout.addWidget(self.reports_btn)
 
             icon_buttons_layout.addStretch()
             layout.addLayout(icon_buttons_layout)
@@ -3359,6 +3765,7 @@ class Sidebar(QFrame):
         main_layout.addWidget(scroll)
 
     def start_sync(self):
+        parent = self.parent()
         try:
             # Use BackgroundSyncThread to get sync results
             if hasattr(self, "sync_thread") and self.sync_thread and self.sync_thread.isRunning():
@@ -3367,9 +3774,13 @@ class Sidebar(QFrame):
             
             self.sync_thread = BackgroundSyncThread()
             self.sync_thread.finished.connect(self.on_sync_finished)
+            if parent and hasattr(parent, "show_operation_loader"):
+                parent.show_operation_loader("Syncing attendance with FixHR...")
             self.sync_thread.start()
             QMessageBox.information(self, "Sync Started", "Attendance sync started. You will be notified when it completes.")
         except Exception as e:
+            if parent and hasattr(parent, "hide_operation_loader"):
+                parent.hide_operation_loader()
             QMessageBox.critical(self, "Error", f"Failed to start attendance sync: {str(e)}")
     
     def on_sync_finished(self, result):
@@ -3398,11 +3809,19 @@ class Sidebar(QFrame):
             # Also directly refresh the attendance table to ensure sync status is updated
             if parent and hasattr(parent, "load_attendance_logs"):
                 parent.load_attendance_logs()
+        parent = self.parent()
+        if parent and hasattr(parent, "hide_operation_loader"):
+            parent.hide_operation_loader()
 
     def open_settings(self):
         parent = self.parent()
         if parent and hasattr(parent, "open_settings_dialog"):
             parent.open_settings_dialog()
+
+    def open_reports(self):
+        parent = self.parent()
+        if parent and hasattr(parent, "open_reports_dialog"):
+            parent.open_reports_dialog()
 
     def on_date_selected(self):
         selected_date = self.calendar.selectedDate().toString("dd-MM-yyyy")
@@ -3639,6 +4058,16 @@ class AttendanceApp(QWidget):
         self.detect_worker_running = False
         self._detect_worker = None
         self.attendance_data = []
+        self.face_marking_enabled = False
+        self.face_box_relative = None
+        self.face_box_updated_at = None
+        self.blink_tracker = BlinkTracker()
+        self.blink_detection_user_enabled = False
+        self.blink_detection_enabled = False
+        self.blink_required_count = 1
+        self.remaining_blinks = 0
+        self.blink_ready_for_detection = True
+        self.is_detecting = False
         self.cap = None
         self.auto_sync_timer = QTimer(self)
         self.auto_sync_timer.timeout.connect(self.check_auto_sync_schedule)
@@ -3654,6 +4083,7 @@ class AttendanceApp(QWidget):
             db_path=resource_path("employees.db"),
         )
         self.apply_sync_settings(self.sync_settings)
+        self.apply_detection_settings()
         if is_logged_in():
             self.session = load_session()
             self.show_admin_view()
@@ -3738,6 +4168,95 @@ class AttendanceApp(QWidget):
             self.update_guest_table()
         if hasattr(self, "guest_refresh_timer"):
             self.guest_refresh_timer.start(30000)
+        self.update_register_button_state()
+
+    def update_register_button_state(self):
+        if not hasattr(self, "device_register_btn"):
+            return
+        is_admin = is_logged_in()
+        self.device_register_btn.setVisible(is_admin)
+        if not is_admin:
+            return
+        registered = get_setting("device_registered", "0") == "1"
+        if registered:
+            self.device_register_btn.setText("Device Registered")
+            self.device_register_btn.setEnabled(False)
+            self.device_register_btn.setToolTip("Device already registered with FixHR")
+        else:
+            self.device_register_btn.setText("Register Device")
+            if is_logged_in():
+                self.device_register_btn.setEnabled(True)
+                self.device_register_btn.setToolTip("Register this device with FixHR")
+            else:
+                self.device_register_btn.setEnabled(False)
+                self.device_register_btn.setToolTip("Login as admin to register device")
+
+    def show_operation_loader(self, message):
+        if not hasattr(self, "operation_loader"):
+            return
+        self.loader_request_count += 1
+        self.operation_loader_label.setText(message)
+        self.operation_loader_label.show()
+        self.operation_loader.show()
+
+    def hide_operation_loader(self):
+        if not hasattr(self, "operation_loader"):
+            return
+        self.loader_request_count = max(0, self.loader_request_count - 1)
+        if self.loader_request_count == 0:
+            self.operation_loader.hide()
+            self.operation_loader_label.hide()
+            self.operation_loader_label.setText("")
+
+    def register_device(self):
+        if get_setting("device_registered", "0") == "1":
+            QMessageBox.information(self, "Already Registered", "This device is already registered with FixHR.")
+            self.update_register_button_state()
+            return
+        if not is_logged_in():
+            QMessageBox.warning(self, "Admin Required", "Please login as admin before registering the device.")
+            return
+        token = self.session.get("token") if self.session else None
+        if not token:
+            QMessageBox.warning(self, "Missing Token", "Authentication token is missing. Please re-login.")
+            return
+
+        self.device_info_data = get_device_info()
+        payload = {
+            "device_name": self.device_info_data.get("device_name"),
+            "device_model": self.device_info_data.get("device_model"),
+            "connectivity": self.device_info_data.get("connectivity"),
+            "mac_address": self.device_info_data.get("mac_address"),
+            "registered_by": self.session.get("name", "Unknown"),
+            "registered_email": self.session.get("email", ""),
+            "employee_id": self.session.get("employee_id", ""),
+            "business_id": self.session.get("business_id", ""),
+            "business_name": self.session.get("business_name", ""),
+            "branch_id": self.session.get("branch_id", ""),
+            "user_id": self.session.get("user_id", ""),
+            "role_name": self.session.get("role_name", ""),
+            "role_id": self.session.get("role_id", ""),
+            "emp_code": self.session.get("emp_code", ""),
+            "phone": self.session.get("phone", ""),
+        }
+
+        self.device_register_btn.setEnabled(False)
+        self.show_operation_loader("Registering device with FixHR...")
+        self.device_registration_thread = DeviceRegistrationThread(token, payload)
+        self.device_registration_thread.finished.connect(self.on_device_registration_finished)
+        self.device_registration_thread.start()
+
+    def on_device_registration_finished(self, result):
+        self.hide_operation_loader()
+        success = result.get("success")
+        message = result.get("message", "Device registration completed.")
+        if success:
+            set_setting("device_registered", "1")
+            QMessageBox.information(self, "Registration Complete", message)
+        else:
+            QMessageBox.warning(self, "Registration Failed", message)
+        self.device_registration_thread = None
+        self.update_register_button_state()
 
     def apply_sync_settings(self, settings=None):
         settings = settings or get_sync_settings()
@@ -3749,6 +4268,157 @@ class AttendanceApp(QWidget):
                 self.auto_sync_timer.start(60000)
         else:
             self.auto_sync_timer.stop()
+
+    def apply_detection_settings(self, settings=None):
+        if settings and "face_marking_enabled" in settings:
+            detection_settings = {
+                "face_marking_enabled": settings.get("face_marking_enabled", False),
+                "blink_detection_enabled": settings.get("blink_detection_enabled", False),
+                "blink_detection_count": settings.get("blink_detection_count", 1),
+            }
+        else:
+            detection_settings = get_detection_settings()
+
+        self.face_marking_enabled = bool(detection_settings.get("face_marking_enabled", False))
+        if not self.face_marking_enabled:
+            self.face_box_relative = None
+            self.face_box_updated_at = None
+
+        self.blink_detection_user_enabled = bool(
+            detection_settings.get("blink_detection_enabled", False)
+        )
+        try:
+            self.blink_required_count = max(1, int(detection_settings.get("blink_detection_count", 1)))
+        except (TypeError, ValueError):
+            self.blink_required_count = 1
+
+        tracker_ready = self.blink_tracker.available if self.blink_tracker else False
+        self.blink_detection_enabled = self.blink_detection_user_enabled and tracker_ready
+
+        if self.blink_detection_user_enabled and not tracker_ready:
+            print("[WARN] Blink detection requested but tracker is unavailable on this device.")
+
+        if not self.is_detecting:
+            if self.blink_detection_enabled:
+                self.remaining_blinks = self.blink_required_count
+                self.blink_ready_for_detection = False
+            else:
+                self.remaining_blinks = 0
+                self.blink_ready_for_detection = True
+        else:
+            self.prepare_blink_requirement(show_prompt=True)
+
+    def prepare_blink_requirement(self, show_prompt=True):
+        if not self.blink_detection_enabled or not self.is_detecting:
+            self.remaining_blinks = 0 if not self.blink_detection_enabled else self.blink_required_count
+            self.blink_ready_for_detection = not self.blink_detection_enabled
+            if self.blink_tracker:
+                self.blink_tracker.reset_cycle()
+            return
+
+        self.remaining_blinks = self.blink_required_count
+        self.blink_ready_for_detection = False
+        if self.blink_tracker:
+            self.blink_tracker.reset_cycle()
+        if show_prompt and hasattr(self, "employee_card"):
+            plural = "times" if self.remaining_blinks > 1 else "time"
+            self.employee_card.update_value(f"Blink {self.remaining_blinks} {plural} to continue")
+
+    def on_blink_detected(self):
+        if not (self.blink_detection_enabled and self.is_detecting):
+            return
+        if self.blink_ready_for_detection or self.remaining_blinks <= 0:
+            return
+
+        self.remaining_blinks -= 1
+        if self.remaining_blinks <= 0:
+            self.blink_ready_for_detection = True
+            if hasattr(self, "employee_card"):
+                self.employee_card.update_value("Blink detected - scanning...")
+        else:
+            if hasattr(self, "employee_card"):
+                plural = "times" if self.remaining_blinks > 1 else "time"
+                self.employee_card.update_value(f"Blink {self.remaining_blinks} more {plural}")
+
+    def update_face_marking_bbox(self, bbox, frame_size):
+        if not self.face_marking_enabled:
+            self.face_box_relative = None
+            return
+        if not bbox or not frame_size:
+            self.face_box_relative = None
+            return
+        frame_w, frame_h = frame_size
+        if not frame_w or not frame_h:
+            self.face_box_relative = None
+            return
+        x1, y1, x2, y2 = bbox
+        width = max(frame_w, 1)
+        height = max(frame_h, 1)
+        self.face_box_relative = (
+            max(0.0, min(1.0, x1 / width)),
+            max(0.0, min(1.0, y1 / height)),
+            max(0.0, min(1.0, x2 / width)),
+            max(0.0, min(1.0, y2 / height)),
+        )
+        self.face_box_updated_at = datetime.datetime.now()
+
+    # def draw_face_marking(self, pixmap):
+    #     if not self.face_marking_enabled or not self.face_box_relative:
+    #         return
+    #     painter = QPainter(pixmap)
+    #     painter.setRenderHint(QPainter.Antialiasing)
+    #     pen = QPen(QColor("#00E676"))
+    #     pen.setWidth(1)
+    #     painter.setPen(pen)
+
+    #     width = pixmap.width()
+    #     height = pixmap.height()
+    #     x1_ratio, y1_ratio, x2_ratio, y2_ratio = self.face_box_relative
+    #     x1 = int(x1_ratio * width)
+    #     y1 = int(y1_ratio * height)
+    #     x2 = int(x2_ratio * width)
+    #     y2 = int(y2_ratio * height)
+    #     rect = QRect(x1, y1, max(10, x2 - x1), max(10, y2 - y1))
+    #     painter.drawRoundedRect(rect, 16, 16)
+
+    def draw_face_marking(self, pixmap):
+        if not self.face_marking_enabled or not self.face_box_relative:
+            return
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        pen = QPen(QColor("#00E676"))   # Green
+        pen.setWidth(1)                 # Thin line
+        painter.setPen(pen)
+
+        width = pixmap.width()
+        height = pixmap.height()
+
+        x1_ratio, y1_ratio, x2_ratio, y2_ratio = self.face_box_relative
+        x1 = int(x1_ratio * width)
+        y1 = int(y1_ratio * height)
+        x2 = int(x2_ratio * width)
+        y2 = int(y2_ratio * height)
+
+        # 🔥 shrink amount (reduce box size)
+        shrink = 8  # <--- adjust this value to make box smaller or larger
+
+        # Apply shrink to rectangle
+        rect = QRect(
+            x1 + shrink,
+            y1 + shrink,
+            max(10, (x2 - x1) - (shrink * 2)),
+            max(10, (y2 - y1) - (shrink * 2))
+        )
+
+        painter.drawRoundedRect(rect, 16, 16)
+
+
+        # label_pen = QPen(QColor("#00E5FF"))
+        # painter.setPen(label_pen)
+        # painter.drawText(rect.left() + 6, max(15, rect.top() - 6), "Face Marking")
+        painter.end()
 
     def check_auto_sync_schedule(self):
         if not getattr(self, "auto_sync_enabled", False):
@@ -3805,8 +4475,16 @@ class AttendanceApp(QWidget):
         dialog.sync_completed.connect(lambda _: self.refresh_data())
         dialog.exec_()
 
+    def open_reports_dialog(self):
+        if not is_logged_in():
+            QMessageBox.warning(self, "Admin Required", "Please log in to view reports.")
+            return
+        dialog = ReportsDialog(self)
+        dialog.exec_()
+
     def on_settings_updated(self, settings):
         self.apply_sync_settings(settings)
+        self.apply_detection_settings(settings)
         self.refresh_data()
 
     def create_circular_mask(self, width, height):
@@ -3937,6 +4615,8 @@ class AttendanceApp(QWidget):
         if hasattr(self, "liveness_loader_thread") and self.liveness_loader_thread:
             self.liveness_loader_thread.quit()
             self.liveness_loader_thread.wait()
+        if hasattr(self, "blink_tracker") and self.blink_tracker:
+            self.blink_tracker.release()
         event.accept()
 
     def load_liveness_detector_async(self):
@@ -3970,6 +4650,7 @@ class AttendanceApp(QWidget):
             )
             return
         self.sidebar.fetch_btn.setEnabled(False)
+        self.show_operation_loader("Fetching employees from FixHR...")
         self.fetch_thread = FetchThread(self.session.get("token", ""))
         self.fetch_thread.finished.connect(
             lambda success, msg: self.on_fetch_completed(success, msg)
@@ -3977,6 +4658,7 @@ class AttendanceApp(QWidget):
         self.fetch_thread.start()
 
     def on_fetch_completed(self, success, message):
+        self.hide_operation_loader()
         if hasattr(self.sidebar, 'fetch_btn'):
             self.sidebar.fetch_btn.setEnabled(True)
         if success:
@@ -4370,6 +5052,7 @@ class AttendanceApp(QWidget):
             f"Device Name: {self.device_info_data['device_name']}\n"
             f"Device Model: {self.device_info_data['device_model']}\n"
             f"Connectivity Mode: {self.device_info_data['connectivity']}\n"
+            f"MAC Address: {self.device_info_data.get('mac_address', 'Unknown')}\n"
             f"Internet Status: {'Online' if online else 'Offline'}"
         )
 
@@ -4577,6 +5260,7 @@ class AttendanceApp(QWidget):
             f"Device Name: {self.device_info_data['device_name']}\n"
             f"Device Model: {self.device_info_data['device_model']}\n"
             f"Connectivity Mode: {self.device_info_data['connectivity']}\n"
+            f"MAC Address: {self.device_info_data.get('mac_address', 'Unknown')}\n"
             f"Internet Status: {self.device_info_data.get('internet_status','Unknown')}"
         )
         self.device_info_label.setStyleSheet(
@@ -4585,7 +5269,68 @@ class AttendanceApp(QWidget):
         self.device_info_label.setWordWrap(True)
         self.device_info_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         left_layout.addWidget(self.device_info_label)
+        left_layout.addSpacing(4)
+
+        self.device_register_btn = QPushButton("Register Device")
+        self.device_register_btn.setCursor(Qt.PointingHandCursor)
+        self.device_register_btn.setFixedHeight(28)
+        self.device_register_btn.setStyleSheet(
+            """
+            QPushButton {
+                font-size: 11px;
+                font-weight: 500;
+                color: #ffffff;
+                background-color: #1976d2;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 10px;
+            }
+            QPushButton:disabled {
+                background-color: #607d8b;
+            }
+            QPushButton:hover { background-color: #1565c0; }
+            QPushButton:pressed { background-color: #0d47a1; }
+            """
+        )
+        self.device_register_btn.clicked.connect(self.register_device)
+        left_layout.addWidget(self.device_register_btn, alignment=Qt.AlignLeft)
+        left_layout.addSpacing(6)
+
+        # Loader area (below camera section)
+        self.operation_loader_container = QFrame()
+        loader_layout = QVBoxLayout(self.operation_loader_container)
+        loader_layout.setContentsMargins(0, 0, 0, 0)
+        loader_layout.setSpacing(4)
+
+        self.operation_loader_label = QLabel("")
+        self.operation_loader_label.setStyleSheet("font-size: 11px; color: #607d8b;")
+        self.operation_loader_label.setWordWrap(True)
+
+        self.operation_loader = QProgressBar()
+        self.operation_loader.setRange(0, 0)
+        self.operation_loader.setTextVisible(False)
+        self.operation_loader.setFixedHeight(8)
+        self.operation_loader.setStyleSheet(
+            """
+            QProgressBar {
+                background-color: #e3f2fd;
+                border-radius: 4px;
+            }
+            QProgressBar::chunk {
+                background-color: #1976d2;
+                border-radius: 4px;
+            }
+            """
+        )
+        self.operation_loader.hide()
+        self.operation_loader_label.hide()
+        loader_layout.addWidget(self.operation_loader_label)
+        loader_layout.addWidget(self.operation_loader)
+        left_layout.addWidget(self.operation_loader_container)
         left_layout.addSpacing(8)
+        self.loader_request_count = 0
+        self.device_registration_thread = None
+        self.update_register_button_state()
 
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 4, 0, 0)
@@ -4967,6 +5712,19 @@ class AttendanceApp(QWidget):
                 self.video_label.width(), self.video_label.height(),
                 Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
             )
+            if self.blink_detection_enabled and self.is_detecting and self.blink_tracker.available:
+                if self.blink_tracker.process(frame):
+                    self.on_blink_detected()
+
+            if self.face_marking_enabled and self.face_box_relative:
+                if (
+                    not self.face_box_updated_at
+                    or (datetime.datetime.now() - self.face_box_updated_at).total_seconds() > 3
+                ):
+                    self.face_box_relative = None
+                else:
+                    self.draw_face_marking(pixmap)
+
             self.video_label.setPixmap(pixmap)
             self.video_label.setText("")
         except Exception as e:
@@ -4998,6 +5756,9 @@ class AttendanceApp(QWidget):
             """
             )
             print("Detection stopped")
+            self.is_detecting = False
+            self.face_box_relative = None
+            self.prepare_blink_requirement(show_prompt=False)
         else:
             self.detect_timer.start(1000)
             self.start_btn.setText("Stop Detection")
@@ -5007,12 +5768,15 @@ class AttendanceApp(QWidget):
                 QPushButton:hover { background: #d32f2f; }
             """
             )
-        self.is_detecting = not self.is_detecting
+            self.is_detecting = True
+            self.prepare_blink_requirement(show_prompt=True)
 
     def detect(self):
         if not self.liveness_detector_loaded or self.detect_and_predict is None:
             return
         if self.cap is None or not self.cap.isOpened():
+            return
+        if self.blink_detection_enabled and not self.blink_ready_for_detection:
             return
         if getattr(self, "detect_worker_running", False):
             return
@@ -5032,9 +5796,12 @@ class AttendanceApp(QWidget):
             lambda: setattr(self, "detect_worker_running", False)
         )
         self._detect_worker.start()
+        if self.blink_detection_enabled:
+            self.prepare_blink_requirement(show_prompt=False)
 
     def on_detect_result(self, result):
         try:
+            self.update_face_marking_bbox(result.get("bbox"), result.get("frame_size"))
             if result.get("status"):
                 if is_logged_in():
                     self.load_attendance_logs()
